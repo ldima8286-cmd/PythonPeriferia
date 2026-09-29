@@ -1,0 +1,74 @@
+#!/usr/bin/env python
+"""Print raw key events from every input device at once.
+
+Answers two questions the normal tooling cannot: which node actually delivers
+a keypress, and which physical key code the kernel reports for it. The
+character on your screen comes from your keyboard layout, while evdev reports
+the physical key, and those are not always the same key.
+
+Run it, press the key you want for PTT, read the output. Ctrl+C to stop.
+"""
+
+from __future__ import annotations
+
+import glob
+import select
+import sys
+
+try:
+    import evdev
+    from evdev import ecodes
+except ImportError:
+    print("evdev is not installed: pip install evdev", file=sys.stderr)
+    raise SystemExit(1) from None
+
+NAMES = {ecodes.KEY_ENTER, ecodes.KEY_SPACE}
+
+
+def main() -> int:
+    # the device objects are kept open on purpose. Reopening one per event was
+    # the bug in the first version of this script, and it reported nothing.
+    devices: dict[int, evdev.InputDevice] = {}
+    print("читаю все узлы ввода:\n")
+    for path in sorted(glob.glob("/dev/input/event*")):
+        try:
+            dev = evdev.InputDevice(path, readonly=True)
+        except OSError as exc:
+            print(f"  {path:22} НЕ ОТКРЫТ: {exc.strerror or exc}")
+            continue
+        devices[dev.fd] = dev
+        caps = set(dev.capabilities().get(ecodes.EV_KEY, []) or [])
+        # codes are integers; comparing them against the names in ecodes.KEY
+        # made every device report as "прочее" in the first version
+        kind = "клавиатура" if NAMES <= caps else "прочее"
+        print(f"  {path:22} {kind:12} phys={dev.phys!r}  {dev.name!r}")
+
+    if not devices:
+        print("\nне удалось открыть ни одного узла ввода")
+        return 1
+
+    print(f"\nоткрыто {len(devices)} узл(ов). нажмите клавишу, Ctrl+C — выход.\n")
+
+    while True:
+        try:
+            readable, _, _ = select.select(list(devices), [], [], 60)
+        except KeyboardInterrupt:
+            print("\nстоп")
+            return 0
+        if not readable:
+            print("за 60 с ничего не нажато")
+            continue
+        for fd in readable:
+            dev = devices[fd]
+            for event in dev.read():
+                if event.type != ecodes.EV_KEY:
+                    continue
+                code = ecodes.KEY.get(event.code, f"код {event.code}")
+                state = {1: "нажата", 0: "отпущена", 2: "повтор"}.get(
+                    event.value, f"={event.value}"
+                )
+                print(f"  {dev.path:22} {code:16} {state}")
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -439,36 +439,60 @@ def test_a_keyboard_without_a_by_id_link_is_still_found(
     ]
 
 
-def test_two_interfaces_of_one_keyboard_are_watched_once(
+def test_every_interface_of_one_keyboard_is_watched(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # evdev gives both nodes the same physical path up to inputN. Watching both
-    # would deliver every keystroke twice.
-    kbd = {
+    # A real external keyboard here exposed three nodes on one physical
+    # device. All three advertised typing keys, two stayed silent, and only
+    # the third delivered presses. Keeping one node per device made PTT dead
+    # with nothing logged, so every usable node has to be watched.
+    caps = {
         hotkey.ecodes.EV_KEY: [
             hotkey.ecodes.KEY_GRAVE,
             hotkey.ecodes.KEY_ENTER,
             hotkey.ecodes.KEY_SPACE,
         ]
     }
-    # one interface has a by-id link, the other is only visible as a bare
-    # event node, so the names say nothing about them being the same keyboard
     links = [
-        (Path("/dev/input/event4"), "usb-Vendor_Kbd-event-kbd"),
-        (Path("/dev/input/event6"), "event6"),
+        (Path("/dev/input/event4"), "usb-COMPANY_USB_Device-event-kbd"),
+        (Path("/dev/input/event5"), "usb-COMPANY_USB_Device-event-if01"),
+        (Path("/dev/input/event6"), "usb-COMPANY_USB_Device-if02-event-kbd"),
     ]
     monkeypatch.setattr(hotkey, "list_input_devices", lambda: links)
     monkeypatch.setattr(
         hotkey,
         "open_device",
-        lambda p: _FakeDevWithPhys(
-            kbd,
-            "usb-0000:00:14.0-2/input0" if "event4" in str(p)
-            else "usb-0000:00:14.0-2/input1",
-        ),
+        lambda p: _FakeDevWithPhys(caps, f"usb-0000:00:14.0-3/input{p.name[-1]}"),
     )
 
-    assert [str(p) for p in hotkey.find_keyboards("auto")] == ["/dev/input/event4"]
+    assert [str(p) for p in hotkey.find_keyboards("auto")] == [
+        "/dev/input/event4",
+        "/dev/input/event5",
+        "/dev/input/event6",
+    ]
+
+
+def test_a_duplicate_press_does_not_fire_twice(monkeypatch: pytest.MonkeyPatch) -> None:
+    # two interfaces of one keyboard both report the same press, which is
+    # exactly why every node can be watched safely
+    dev = _FakeDev()
+    monkeypatch.setattr(hotkey, "open_device", lambda p: dev)
+    presses: list[int] = []
+    releases: list[int] = []
+    listener = hotkey.HotkeyListener(
+        Path("/dev/input/event4"),
+        hotkey.ecodes.KEY_GRAVE,
+        on_press=lambda: presses.append(1),
+        on_release=lambda: releases.append(1),
+    )
+
+    listener._handle(hotkey.ecodes.EV_KEY, hotkey.ecodes.KEY_GRAVE, hotkey.PRESS)
+    listener._handle(hotkey.ecodes.EV_KEY, hotkey.ecodes.KEY_GRAVE, hotkey.PRESS)
+    listener._handle(hotkey.ecodes.EV_KEY, hotkey.ecodes.KEY_GRAVE, hotkey.RELEASE)
+    listener._handle(hotkey.ecodes.EV_KEY, hotkey.ecodes.KEY_GRAVE, hotkey.RELEASE)
+
+    assert len(presses) == 1
+    assert len(releases) == 1
 
 
 def test_two_different_keyboards_are_both_watched(

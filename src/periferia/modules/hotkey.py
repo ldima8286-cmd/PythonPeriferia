@@ -285,19 +285,24 @@ def find_keyboards(
             continue
         try:
             usable = is_keyboard(dev) or (include_pointers and is_pointer(dev))
-            if not usable:
-                continue
-            group = device_group(dev, name, target)
         finally:
             with contextlib.suppress(OSError):
                 dev.close()
+        if not usable:
+            continue
+        # Every usable node is watched. Picking one node per physical device
+        # sounds tidier, but there is no way to tell which interface actually
+        # carries the keys: on one external keyboard here, input0 and input1
+        # reported key capabilities and stayed silent, while input2 delivered
+        # every press. Choosing the first one made PTT dead with no error, and
+        # the press state guards make a duplicate harmless anyway.
+        group = device_group(dev, name, target)
         if group in seen:
             log.info(
-                "skipping %s, %s is another interface of a device already watched",
+                "%s is another interface of a device already watched, keeping it: "
+                "it may be the one that delivers the keys",
                 target,
-                name,
             )
-            continue
         seen.add(group)
         found.append(target)
     return found

@@ -144,9 +144,10 @@ class _FakeDev:
         os.close(self.write_fd)
 
 
-def _listener(dev: _FakeDev) -> hotkey.HotkeyListener:
+def _listener(*devs: _FakeDev) -> hotkey.HotkeyListener:
     listener = hotkey.HotkeyListener.__new__(hotkey.HotkeyListener)
-    listener._dev = dev
+    listener._devs = {Path(f"/dev/input/event{i}"): d for i, d in enumerate(devs)}
+    listener.devices = list(listener._devs)
     listener.ptt_code = 30
     listener.panic_code = None
     listener.ignore_repeat = True
@@ -192,6 +193,71 @@ def test_open_does_not_grab_the_keyboard(monkeypatch: pytest.MonkeyPatch) -> Non
     listener.open()
 
     assert "grab" not in dev.calls
-    listener.close()
     assert "ungrab" not in dev.calls
+
+    listener.close()
     assert "close" in dev.calls
+
+
+def test_press_on_one_keyboard_releases_on_another(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # a laptop keyboard and a USB one are two devices, but they are one user
+    # intention: holding PTT on one and releasing on the other must not stick
+    got: list[str] = []
+    laptop, usb = _FakeDev(), _FakeDev()
+    monkeypatch.setattr(
+        hotkey, "open_device", lambda path: (laptop if "event4" in str(path) else usb)
+    )
+
+    listener = hotkey.HotkeyListener(
+        [Path("/dev/input/event4"), Path("/dev/input/event5")],
+        30,
+        on_press=lambda: got.append("press"),
+        on_release=lambda: got.append("release"),
+    )
+    listener.open()
+
+    laptop.queued = [_FakeEvent(hotkey.ecodes.EV_KEY, 30, hotkey.PRESS)]
+    os.write(laptop.write_fd, b"x")
+    listener.poll(timeout=1.0)
+
+    usb.queued = [_FakeEvent(hotkey.ecodes.EV_KEY, 30, hotkey.RELEASE)]
+    os.write(usb.write_fd, b"x")
+    listener.poll(timeout=1.0)
+
+    assert got == ["press", "release"]
+    laptop.close()
+    usb.close()
+
+
+def test_unplugged_keyboard_does_not_kill_the_others(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # pulling out a USB keyboard mid hold is normal, not a reason to lose PTT
+    got: list[str] = []
+    dying, alive = _FakeDev(), _FakeDev()
+    monkeypatch.setattr(
+        hotkey, "open_device", lambda path: (dying if "event4" in str(path) else alive)
+    )
+
+    listener = hotkey.HotkeyListener(
+        [Path("/dev/input/event4"), Path("/dev/input/event5")],
+        30,
+        on_press=lambda: got.append("press"),
+        on_release=lambda: got.append("release"),
+    )
+    listener.open()
+
+    os.close(dying.read_fd)
+    dying.closed = True
+
+    alive.queued = [_FakeEvent(hotkey.ecodes.EV_KEY, 30, hotkey.PRESS)]
+    os.write(alive.write_fd, b"x")
+    listener.poll(timeout=1.0)
+
+    assert Path("/dev/input/event4") not in listener._devs
+    assert Path("/dev/input/event5") in listener._devs
+    assert got == ["press"]
+    alive.close()
+    listener.close()

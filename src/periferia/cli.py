@@ -11,6 +11,7 @@ import shutil
 import sys
 import time
 from pathlib import Path
+from typing import Any
 
 from .core import config as config_mod
 from .core import envcheck, pipewire
@@ -60,19 +61,32 @@ def cmd_pick_key(args: argparse.Namespace) -> int:
         print("evdev is not installed: pip install evdev", file=sys.stderr)
         return 1
 
-    device = hotkey.pick_device("auto")
-    if device is None:
+    devices = hotkey.find_keyboards("auto")
+    if not devices:
         print("no keyboard device found", file=sys.stderr)
+        print("run 'periferia check' to see what is visible and what is blocked", file=sys.stderr)
         return 1
 
-    print(f"listening on {device}")
+    if len(devices) == 1:
+        print(f"listening on {devices[0]}")
+    else:
+        print(f"listening on {len(devices)} keyboards: {', '.join(str(d) for d in devices)}")
     print("press the key you want for PTT, Esc cancels")
-    print("the device is not grabbed, other programs still see the keypress\n")
+    print("the devices are not grabbed, other programs still see the keypress\n")
 
+    opened: dict[int, Any] = {}
     try:
-        dev = hotkey.open_device(device)
-    except OSError as exc:
-        print(f"cannot open {device}: {exc}", file=sys.stderr)
+        for path in devices:
+            try:
+                dev = hotkey.open_device(path)
+            except OSError as exc:
+                print(f"cannot open {path}: {exc}", file=sys.stderr)
+                continue
+            opened[dev.fd] = dev
+    except Exception:
+        pass
+    if not opened:
+        print("none of the keyboards could be opened", file=sys.stderr)
         print("this usually means missing permissions, see docs/udev.md", file=sys.stderr)
         return 1
 
@@ -84,32 +98,32 @@ def cmd_pick_key(args: argparse.Namespace) -> int:
             # used to call returned (device, event) pairs, and unpacking one
             # of those objects failed before any key could be picked.
             try:
-                readable, _, _ = select.select([dev.fd], [], [], 0.5)
-            except OSError as exc:
-                print(f"input device disappeared: {exc}", file=sys.stderr)
-                return 1
-            if not readable:
-                continue
-            for event in dev.read():
-                if event.type != hotkey.ecodes.EV_KEY or event.value != hotkey.PRESS:
-                    continue
-                name = hotkey.ecodes.KEY.get(event.code, str(event.code))
-                if name == "KEY_ESC":
-                    print("cancelled")
-                    return 130
-                label = hotkey.key_label(event.code)
-                print(f"\n  key   {name}")
-                print(f"  label {label}")
-                print(f"\nyaml:   ptt_key: \"{name}\"")
-                return 0
+                readable, _, _ = select.select(list(opened), [], [], 0.5)
+            except (OSError, ValueError):
+                readable = []
+            for fd in readable:
+                dev = opened[fd]
+                for event in dev.read():
+                    if event.type != hotkey.ecodes.EV_KEY or event.value != hotkey.PRESS:
+                        continue
+                    name = hotkey.ecodes.KEY.get(event.code, str(event.code))
+                    if name == "KEY_ESC":
+                        print("cancelled")
+                        return 130
+                    label = hotkey.key_label(event.code)
+                    print(f"\n  key   {name}")
+                    print(f"  label {label}")
+                    print(f"\nyaml:   ptt_key: \"{name}\"")
+                    return 0
         print("\nnothing pressed, giving up", file=sys.stderr)
         return 1
     except KeyboardInterrupt:
         print("\ncancelled")
         return 130
     finally:
-        with contextlib.suppress(OSError):
-            dev.close()
+        for dev in opened.values():
+            with contextlib.suppress(OSError):
+                dev.close()
     return 1
 
 

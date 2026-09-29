@@ -13,7 +13,8 @@ than any one application.
 - `audio` — a virtual microphone created from the physical one, with a smooth
   volume gate. This is the part PTT is built on.
 - `ptt` — reads keys over evdev, opens the mic on press, closes it on release,
-  with a hold time so the last word is not clipped, and a panic key.
+  with a hold time so the last word is not clipped, and a panic key. Watches
+  every keyboard at once, not just the first one found.
 - `processing` — turns on PipeWire's own RNNoise noise suppression, echo
   cancellation and voice detection. These are module properties, not DSP
   written here.
@@ -30,7 +31,8 @@ bash scripts/dev-setup.sh
 source .venv/bin/activate
 ```
 
-Needs Python 3.11+ and `pipewire-utils`.
+Needs Python 3.11+ and `pipewire-utils`. On Debian, Ubuntu, Arch, openSUSE and
+Alpine the script prints the exact package command if `pactl` is missing.
 
 ### On Fedora Atomic, Bazzite and other immutable systems
 
@@ -111,7 +113,34 @@ reads the keyboard, it never grabs it, so your typing keeps working normally.
 | `audio.hold_ms` | 200 | keeps the mic open briefly after release |
 | `audio.curve` | exp | `exp`, `linear` or `s_curve` |
 | `ptt.ptt_key` | auto | physical key, see below |
+| `ptt.device` | auto | which keyboards to watch, see below |
 | `ptt.panic_key` | KEY_F12 | instant mute, ignores `hold_ms` |
+
+## Keyboards and other input devices
+
+By default Periferia watches **every** keyboard it can open, not just the first
+one. A laptop keyboard, an external USB keyboard and a Bluetooth keyboard are
+three devices, and the same key must work on all of them. It identifies them by
+capability rather than by name, because the name in `/dev/input/by-id` is
+whatever the vendor typed in and a mouse also exposes a keyboard-style
+interface.
+
+Press state is shared between them. Holding PTT on the laptop keyboard and
+releasing it on the external one still closes the microphone, instead of
+leaving it stuck open. Unplugging a keyboard mid-hold drops that device and
+keeps working on the rest.
+
+To restrict it, set `ptt.device` to one node or to several, comma separated:
+
+```yaml
+ptt:
+  device: /dev/input/by-id/usb-SomeVendor_Keyboard-event-kbd
+  # or several, if you only trust some of them:
+  # device: /dev/input/event4, /dev/input/event7
+```
+
+`periferia pick-key` listens on all keyboards as well, so the key can be
+pressed on whichever one you like.
 
 ## About the key names
 
@@ -149,10 +178,30 @@ The floor is the PipeWire quantum, not this program. The default 1024 at
 `pipewire.conf` setting and helps more than anything in this repository. Going
 too low makes the whole chain glitch if heavy filters are in use.
 
+## What is tested where
+
+Being honest about this, because it decides how you should file a bug.
+
+| | status |
+| --- | --- |
+| Fedora, Wayland, PipeWire 1.6, two keyboards | tested, PTT verified end to end |
+| Fedora Atomic / Bazzite | supported by the setup script, not verified |
+| Debian, Ubuntu, Arch, openSUSE, Alpine | no automated testing, dependency names only |
+| PulseAudio instead of PipeWire | not supported, `module-echo-cancel` is PipeWire |
+| X11 | should work, not verified |
+| Keyboards over Bluetooth | should work if the udev rule matches them, not verified |
+
+There are no CI runs, so "works on my machine" is currently the only evidence.
+If you get it running somewhere else, the useful thing to report is the distro,
+the desktop session, and the output of `periferia check`.
+
 ## Troubleshooting
 
 **Keys are not detected.** `periferia check` marks unreadable devices. See
 docs/udev.md.
+
+**A key works on one keyboard but not another.** The other one is probably
+blocked by permissions. `periferia check` lists which nodes it could not open.
 
 **Mic opens but nothing is heard.** The app is probably still on the physical
 source. Run `periferia sources`, then `periferia set-default`.

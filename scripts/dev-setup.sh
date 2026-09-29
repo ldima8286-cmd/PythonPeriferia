@@ -8,12 +8,37 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
+# Runtime dependency check, with the package name for the distro in use. The
+# names differ and guessing wrong sends people to the wrong command.
+check_runtime_deps() {
+    local missing=0
+    if ! command -v pactl >/dev/null 2>&1; then
+        missing=1
+        warn "pactl not found, needed to control the sound server"
+        cat >&2 <<'EOF'
+
+  Fedora, Bazzite, RHEL:   sudo dnf install pipewire-utils
+  Arch:                    sudo pacman -S pipewire-utils
+  Debian, Ubuntu, Mint:    sudo apt install pipewire-utils
+  openSUSE:                sudo zypper install pipewire-utils
+  Alpine:                  sudo apk add pipewire-utils
+
+EOF
+    fi
+    if ! command -v systemctl >/dev/null 2>&1; then
+        warn "systemctl not found, the daemon cannot be installed as a service here"
+    fi
+    [ "$missing" -eq 0 ] || true
+}
+
 is_atomic() {
   [ -e /run/ostree-booted ] || command -v rpm-ostree >/dev/null 2>&1
 }
 
 say() { printf '\033[1m==>\033[0m %s\n' "$1"; }
 warn() { printf '\033[33m!!\033[0m %s\n' "$1" >&2; }
+
+check_runtime_deps
 
 ATOMIC=0
 if is_atomic; then
@@ -80,6 +105,13 @@ Options, easiest first:
   3. on Fedora Atomic / Bazzite use rpm-ostree instead of dnf:
        sudo rpm-ostree install python3-devel
        sudo systemctl reboot
+
+  4. on other distributions:
+       sudo apt install python3-dev        # Debian, Ubuntu, Mint
+       sudo pacman -S python               # Arch
+       sudo zypper install python3-devel    # openSUSE
+       sudo apk add python3-dev            # Alpine
+       sudo emerge dev-python/python        # Gentoo
 EOF
         exit 1
     fi

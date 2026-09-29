@@ -9,8 +9,10 @@ from __future__ import annotations
 
 import contextlib
 import logging
+import os
 import select
-from collections.abc import Callable
+import time
+from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -23,6 +25,14 @@ except ImportError:  # pragma: no cover
 log = logging.getLogger(__name__)
 
 BY_ID = Path("/dev/input/by-id")
+
+
+def _fd_alive(dev: Any) -> bool:
+    try:
+        os.fstat(dev.fd)
+    except (OSError, ValueError):
+        return False
+    return True
 
 PRESS = 1
 RELEASE = 0
@@ -105,35 +115,80 @@ def open_device(path: Path | str) -> Any:
     return InputDevice(str(path), readonly=True)
 
 
-def pick_device(preferred: str = "auto") -> Path | None:
-    if preferred != "auto":
-        path = Path(preferred)
-        if path.exists():
-            return path
-        log.warning("configured device %s not found, falling back to auto", preferred)
+def is_keyboard(dev: Any) -> bool:
+    """True when the device emits ordinary typing keys.
 
+    Capabilities are the only reliable test. The name in /dev/input/by-id is
+    whatever the vendor typed in, and a mouse exposes a keyboard style
+    interface too, which is why filtering on "event-kbd" alone is not enough.
+    """
+    try:
+        codes = dev.capabilities().get(ecodes.EV_KEY, [])
+    except Exception:
+        return False
+    names = {ecodes.KEY.get(code) for code in codes}
+    return "KEY_ENTER" in names and "KEY_SPACE" in names
+
+
+def find_keyboards(preferred: str = "auto") -> list[Path]:
+    """Every usable keyboard, not just the first one.
+
+    A machine can easily have three: the laptop keyboard, an external USB one
+    and a Bluetooth one. Listening to a single device means the PTT key works
+    only on that device, which looks like a broken key elsewhere. "auto"
+    returns all of them. An explicit value may list several, comma separated.
+    """
     if InputDevice is None:
-        return None
+        return []
+
+    if preferred and preferred != "auto":
+        wanted: list[Path] = []
+        for part in preferred.split(","):
+            part = part.strip()
+            if not part:
+                continue
+            path = Path(part)
+            if not path.exists():
+                log.warning("configured device %s not found", path)
+                continue
+            wanted.append(path)
+        if wanted:
+            return wanted
+        return []
+
+    found: list[Path] = []
     for target, _name in list_input_devices():
         try:
             dev = open_device(target)
         except OSError as exc:
             log.debug("cannot open %s: %s", target, exc)
             continue
-        names = {ecodes.KEY[n] for n in dev.capabilities().get(ecodes.EV_KEY, [])}
-        is_kbd = "KEY_ENTER" in names or "KEY_SPACE" in names
-        dev.close()
-        if is_kbd:
-            return target
-    return None
+        try:
+            if is_keyboard(dev):
+                found.append(target)
+        finally:
+            with contextlib.suppress(OSError):
+                dev.close()
+    return found
+
+
+def pick_device(preferred: str = "auto") -> Path | None:
+    """Backwards compatible single device accessor."""
+    devices = find_keyboards(preferred)
+    return devices[0] if devices else None
 
 
 class HotkeyListener:
-    """Blocking event loop that calls back on press and release."""
+    """Watches every keyboard at once and calls back on press and release.
+
+    Press state is global rather than per device, so pressing PTT on the laptop
+    keyboard and releasing it on the external one still closes the microphone
+    instead of leaving it stuck open.
+    """
 
     def __init__(
         self,
-        device: Path,
+        devices: Sequence[Path],
         ptt_code: int,
         *,
         panic_code: int | None = None,
@@ -144,38 +199,75 @@ class HotkeyListener:
     ) -> None:
         if InputDevice is None:
             raise RuntimeError("evdev is not installed")
-        self.device = device
+        if isinstance(devices, (str, Path)):
+            devices = [Path(devices)]
+        self.devices = [Path(d) for d in devices]
         self.ptt_code = ptt_code
         self.panic_code = panic_code
         self.ignore_repeat = ignore_repeat
         self.on_press = on_press
         self.on_release = on_release
         self.on_panic = on_panic
-        self._dev: InputDevice | None = None
+        self._devs: dict[Path, Any] = {}
         self._down = False
 
     def open(self) -> None:
-        self._dev = open_device(self.device)
-        log.info("listening on %s", self.device)
+        for path in self.devices:
+            self._devs[path] = open_device(path)
+        log.info(
+            "listening on %d device(s): %s",
+            len(self._devs),
+            ", ".join(str(p) for p in self._devs),
+        )
 
     def close(self) -> None:
-        if self._dev is not None:
+        for dev in self._devs.values():
             with contextlib.suppress(OSError):
-                self._dev.close()
-            self._dev = None
+                dev.close()
+        self._devs.clear()
+
+    def _drop(self, path: Path, reason: str) -> None:
+        dev = self._devs.pop(path, None)
+        if dev is not None:
+            with contextlib.suppress(OSError):
+                dev.close()
+        log.warning("stopped watching %s: %s", path, reason)
+        if self._down:
+            self._down = False
+            if self.on_release:
+                self.on_release()
 
     def poll(self, timeout: float = 0.2) -> None:
-        if self._dev is None:
+        if not self._devs:
             raise RuntimeError("listener is not open")
-        try:
-            readable, _, _ = select.select([self._dev.fd], [], [], timeout)
-        except (OSError, ValueError) as exc:
-            log.error("input device disappeared: %s", exc)
-            raise
-        if not readable:
+        deadline = time.monotonic() + timeout
+        while True:
+            by_fd = {dev.fd: path for path, dev in self._devs.items()}
+            remaining = max(0.0, deadline - time.monotonic())
+            try:
+                readable, _, _ = select.select(list(by_fd), [], [], remaining)
+            except (OSError, ValueError):
+                # A device can vanish between select() calls when a USB keyboard
+                # is unplugged. Drop the offender and retry on the rest, so that
+                # events already queued on the surviving keyboards are not
+                # swallowed by somebody else's disappearance.
+                gone = [path for path, dev in self._devs.items() if not _fd_alive(dev)]
+                for path in gone:
+                    self._drop(path, "device disappeared")
+                if not self._devs:
+                    raise RuntimeError("all input devices disappeared") from None
+                continue
+            for fd in readable:
+                path = by_fd[fd]
+                dev = self._devs[path]
+                try:
+                    events = list(dev.read())
+                except OSError as exc:
+                    self._drop(path, str(exc))
+                    continue
+                for event in events:
+                    self._handle(event.type, event.code, event.value)
             return
-        for event in self._dev.read():
-            self._handle(event.type, event.code, event.value)
 
     def _handle(self, ev_type: int, code: int, value: int) -> None:
         if ev_type != ecodes.EV_KEY:

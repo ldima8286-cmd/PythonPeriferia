@@ -39,7 +39,12 @@ ptt:
   # Instant mute, ignoring hold_ms. Set to "" to disable.
   panic_key: KEY_F12
 
-  # /dev/input/eventN, or "auto" to find a keyboard.
+  # Which keyboards to watch. "auto" watches every keyboard it can open, which
+  # is what you want when you have a laptop keyboard plus an external one, so
+  # the key works on both. To restrict it, give one node, or several comma
+  # separated: "/dev/input/event4, /dev/input/event7". A stable name is better
+  # than eventN, which can change after a reboot:
+  #   ls /dev/input/by-id/
   device: auto
 
   # Ignore key auto-repeat. Keep true, otherwise the key sticks when held.

@@ -10,7 +10,7 @@ import time
 from types import FrameType
 
 from ..modules.audio import VirtualMic
-from ..modules.hotkey import HotkeyListener, pick_device, resolve_key
+from ..modules.hotkey import HotkeyListener, find_keyboards, resolve_key
 from ..modules.processing import MicProcessing
 from . import config as config_mod
 from . import logging_setup
@@ -87,15 +87,16 @@ class Daemon:
             log.error("cannot resolve ptt_key %r", self.cfg.ptt.ptt_key)
             return False
 
-        device = pick_device(self.cfg.ptt.device)
-        if device is None:
+        devices = find_keyboards(self.cfg.ptt.device)
+        if not devices:
             log.error("no keyboard device found")
+            log.error("run 'periferia check' to see what is visible and unreadable")
             return False
 
         panic = resolve_key(self.cfg.ptt.panic_key) if self.cfg.ptt.panic_key else None
 
         self._listener = HotkeyListener(
-            device,
+            devices,
             code,
             panic_code=panic,
             ignore_repeat=self.cfg.ptt.ignore_repeat,

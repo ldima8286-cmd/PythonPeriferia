@@ -98,6 +98,28 @@ def check_sources() -> list[Result]:
     return results
 
 
+def _looks_like_mouse(name: str) -> bool:
+    """Best guess from the by-id name, used only when the node is unreadable.
+
+    A udev rule is written for the keyboards, so the mouse's extra input
+    interfaces stay blocked on purpose. Reporting that as a warning made a
+    correctly configured machine look half broken.
+    """
+    lowered = name.lower()
+    return "mouse" in lowered or "pointer" in lowered
+
+
+def _is_keyboard(dev: object) -> bool:
+    from ..modules.hotkey import ecodes
+
+    try:
+        caps = dev.capabilities().get(ecodes.EV_KEY, [])  # type: ignore[attr-defined]
+    except Exception:
+        return False
+    names = {ecodes.KEY.get(code) for code in caps}
+    return "KEY_ENTER" in names or "KEY_SPACE" in names
+
+
 def check_input_access() -> list[Result]:
     from ..modules.hotkey import list_input_devices, open_device
 
@@ -113,39 +135,60 @@ def check_input_access() -> list[Result]:
         ]
 
     results: list[Result] = []
-    readable = 0
-    blocked: list[str] = []
+    keyboards_ok = 0
+    keyboards_seen = 0
+    keyboards_blocked: list[str] = []
+    other_blocked = 0
 
     for path, name in devices:
         try:
             dev = open_device(path)
         except Exception as exc:
-            blocked.append(name)
+            if _looks_like_mouse(name):
+                # Expected to be blocked, and not a problem for PTT.
+                other_blocked += 1
+                continue
+            keyboards_seen += 1
+            keyboards_blocked.append(name)
             reason = exc.strerror if isinstance(exc, OSError) and exc.strerror else str(exc)
             results.append(Result(f"input:{name}", WARN, f"cannot open: {reason}"))
             continue
-        dev.close()
-        readable += 1
-        results.append(Result(f"input:{name}", OK, "openable for reading"))
 
-    if readable == 0:
+        keyboard = _is_keyboard(dev)
+        dev.close()
+        if keyboard:
+            keyboards_seen += 1
+            keyboards_ok += 1
+            results.append(Result(f"input:{name}", OK, "openable for reading"))
+        else:
+            results.append(Result(f"input:{name}", OK, "openable for reading, not a keyboard"))
+
+    if keyboards_ok:
+        if other_blocked:
+            results.append(
+                Result(
+                    "input",
+                    OK,
+                    f"{keyboards_ok} keyboard(s) readable, "
+                    f"{other_blocked} non-keyboard device(s) blocked",
+                    "blocked non-keyboard devices are expected and do not affect PTT",
+                )
+            )
+    else:
         results.append(
             Result(
                 "input",
                 FAIL,
-                "no device can be opened",
+                "no keyboard can be opened"
+                if keyboards_seen
+                else "no device can be opened",
                 "evdev cannot borrow logind access; a udev rule is required, see docs/udev.md",
             )
         )
-    elif readable < len(devices):
-        results.append(
-            Result(
-                "input",
-                WARN,
-                f"{readable} of {len(devices)} device(s) readable",
-                "some devices are blocked; see docs/udev.md",
+        if keyboards_blocked:
+            results.append(
+                Result("input:blocked", WARN, ", ".join(keyboards_blocked))
             )
-        )
     return results
 
 

@@ -9,6 +9,7 @@ import pytest
 config_mod = importlib.import_module("periferia.core.config")
 audio_mod = importlib.import_module("periferia.modules.audio")
 processing_mod = importlib.import_module("periferia.modules.processing")
+pipewire_mod = importlib.import_module("periferia.core.pipewire")
 
 AudioConfig = config_mod.AudioConfig
 ProcessingConfig = config_mod.ProcessingConfig
@@ -23,6 +24,8 @@ class _FakePipewire:
         self.source = source
         self.loaded: list[tuple[str, list[str]]] = []
         self.unloaded: list[int] = []
+        self.stale: list[int] = []
+        self.stale_checked: list[tuple[str, str]] = []
         self._next_id = 77
 
     def find_source(self, name: str) -> str | None:
@@ -41,6 +44,15 @@ class _FakePipewire:
     def unload_module(self, module_id: int) -> bool:
         self.unloaded.append(module_id)
         return True
+
+    def unload_stale(self, module_name: str, description: str) -> list[int]:
+        # mirrors the real one, which unloads through unload_module
+        self.stale_checked.append((module_name, description))
+        removed = []
+        for module_id in self.stale:
+            if self.unload_module(module_id):
+                removed.append(module_id)
+        return removed
 
 
 def _processing(
@@ -143,3 +155,55 @@ def test_teardown_does_not_unload_a_module_it_does_not_own(
     mic.teardown()
 
     assert mic.source is None
+
+
+def test_stale_module_is_unloaded_before_loading_a_new_one(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A killed run leaves the module up and the new source collides on name, so
+    # the gate drives one source while the self check reads the other.
+    processing, fake = _processing(monkeypatch, source="echo-cancel-source")
+    fake.stale = [41, 42]
+
+    processing.start("hw:physical", name="PeriferiaMic")
+
+    assert fake.unloaded == [41, 42], "leftovers have to go before ours loads"
+    assert fake.stale_checked == [("module-echo-cancel", "PeriferiaMic")]
+
+
+def test_no_stale_module_means_nothing_extra_is_unloaded(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    processing, fake = _processing(monkeypatch, source="echo-cancel-source")
+
+    processing.start("hw:physical", name="PeriferiaMic")
+
+    assert fake.unloaded == []
+
+
+def test_stale_detection_ignores_other_apps(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Only our own leftovers, matched on the description we asked for, because
+    # the source name is not the same on every machine.
+    listed = [
+        {
+            "name": "echo-cancel-source",
+            "owner_module": 7,
+            "properties": {"device.description": "PeriferiaMic"},
+        },
+        {
+            "name": "somebody-elses-mic",
+            "owner_module": 9,
+            "properties": {"device.description": "Zoom"},
+        },
+    ]
+    modules = [
+        {"id": 7, "name": "module-echo-cancel"},
+        {"id": 9, "name": "module-echo-cancel"},
+        {"id": 11, "name": "module-loopback"},
+    ]
+    monkeypatch.setattr(pipewire_mod, "sources", lambda: listed)
+    monkeypatch.setattr(pipewire_mod, "modules", lambda: modules)
+
+    assert pipewire_mod.stale_modules("module-echo-cancel", "PeriferiaMic") == [7]
+    assert pipewire_mod.stale_modules("module-echo-cancel", "") == []
+    assert pipewire_mod.stale_modules("module-loopback", "PeriferiaMic") == []

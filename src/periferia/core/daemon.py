@@ -205,25 +205,25 @@ class Daemon:
 
         listener = self._listener
         assert listener is not None
+        opened = False
+        locked_watch = False
 
         try:
-            listener.open()
-        except (OSError, RuntimeError) as exc:
-            log.error("cannot open the input device: %s", exc)
-            log.error("this usually means missing permissions, see docs/udev.md")
-            return 1
+            try:
+                listener.open()
+                opened = True
+            except (OSError, RuntimeError) as exc:
+                log.error("cannot open the input device: %s", exc)
+                log.error("this usually means missing permissions, see docs/udev.md")
+                return 1
 
-        if not self.cfg.ptt.release_on_lock:
-            log.info("release_on_lock is off, a locked session will not close the mic")
-        else:
-            self._lock = SessionLockWatcher(self.on_session_locked)
-            if not self._lock.start():
-                self._lock = None
-                log.info("continuing without screen lock protection")
+            self._watch_session_lock()
+            locked_watch = self._lock is not None
 
-        log.info("periferia is running, mic %s, press Ctrl+C to stop", self.mic.source)
+            log.info(
+                "periferia is running, mic %s, press Ctrl+C to stop", self.mic.source
+            )
 
-        try:
             while not self._stop.is_set():
                 listener.poll(timeout=0.2)
                 if self._lock is not None:
@@ -236,13 +236,27 @@ class Daemon:
             log.error("input loop ended: %s", exc)
             return 1
         finally:
-            listener.close()
-            if self._lock is not None:
+            # every exit has to go through here. Returning early on a failed
+            # device open used to leave the echo cancel module loaded, and the
+            # next run then collided with it on the source name
+            if opened:
+                listener.close()
+            if locked_watch and self._lock is not None:
                 self._lock.stop()
+                self._lock = None
             self.mic.force_silence()
             self.processing.stop()
             self.mic.teardown()
         return 0
+
+    def _watch_session_lock(self) -> None:
+        if not self.cfg.ptt.release_on_lock:
+            log.info("release_on_lock is off, a locked session will not close the mic")
+        else:
+            self._lock = SessionLockWatcher(self.on_session_locked)
+            if not self._lock.start():
+                self._lock = None
+                log.info("continuing without screen lock protection")
 
     def stop(self, signum: int, frame: FrameType | None) -> None:
         log.info("signal %s, shutting down", signum)

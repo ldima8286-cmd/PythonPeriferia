@@ -68,6 +68,15 @@ class MicProcessing:
         if self._module_id is not None:
             return self._source
 
+        # clear anything a killed run left behind, otherwise two sources answer
+        # to one name and the gate drives the wrong one
+        for stale_id in pipewire.unload_stale(MODULE, name or ""):
+            log.warning(
+                "unloaded leftover %s (module %s) from a previous run",
+                MODULE,
+                stale_id,
+            )
+
         props = build_props(self.cfg) if self.cfg.enabled else {}
         if name:
             props["source_properties"] = f"device.description={name}"

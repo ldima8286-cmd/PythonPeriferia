@@ -76,6 +76,11 @@ def sources() -> list[dict[str, Any]]:
     return data if isinstance(data, list) else []
 
 
+def modules() -> list[dict[str, Any]]:
+    data = _json([PACTL, "-f", "json", "list", "short", "modules"])
+    return data if isinstance(data, list) else []
+
+
 def short_sources() -> list[dict[str, Any]]:
     data = _json([PACTL, "-f", "json", "list", "short", "sources"])
     return data if isinstance(data, list) else []
@@ -130,6 +135,48 @@ def source_by_module(module_id: int) -> str | None:
             if name:
                 return str(name)
     return None
+
+
+def stale_modules(module_name: str, description: str) -> list[int]:
+    """Ids of leftover modules of ours that are still loaded.
+
+    A killed run leaves the module up, PipeWire names the new source the same
+    way, and two nodes then answer to one name. pactl resolves a name to
+    whichever comes first, so the gate would drive one source while the self
+    check read the other, and the level would sit frozen no matter what key was
+    pressed. Matching on the description we asked for keeps this portable: the
+    source name itself is not the same on every machine.
+    """
+    if not description:
+        return []
+    owners: set[int] = set()
+    for item in sources():
+        props = item.get("properties") or {}
+        named = item.get("name") == description or any(
+            props.get(key) == description for key in ("device.description", "node.name")
+        )
+        owner = item.get("owner_module", NO_MODULE)
+        if named and owner != NO_MODULE:
+            owners.add(owner)
+    if not owners:
+        return []
+    out: list[int] = []
+    for item in modules():
+        if item.get("name") != module_name:
+            continue
+        module_id = item.get("id")
+        if isinstance(module_id, int) and module_id in owners:
+            out.append(module_id)
+    return out
+
+
+def unload_stale(module_name: str, description: str) -> list[int]:
+    """Unload leftovers of ours, returning the ids that were removed."""
+    removed: list[int] = []
+    for module_id in stale_modules(module_name, description):
+        if unload_module(module_id):
+            removed.append(module_id)
+    return removed
 
 
 def find_source(description: str) -> str | None:

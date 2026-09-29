@@ -405,3 +405,106 @@ def test_unplugged_keyboard_does_not_kill_the_others(
     assert got == ["press"]
     alive.close()
     listener.close()
+
+
+class _FakeDevWithPhys(_FakeDev):
+    def __init__(self, caps: dict[int, list[int]], phys: str = "") -> None:
+        super().__init__(caps)
+        self.phys = phys
+
+
+def test_a_keyboard_without_a_by_id_link_is_still_found(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A USB keyboard with no serial gets no by-id symlink at all. Reading only
+    # by-id dropped it, so the daemon watched the laptop keyboard and the
+    # external one looked broken with nothing in the log to say why.
+    links = [
+        (Path("/dev/input/event4"), "usb-Vendor_Kbd-event-kbd"),
+        (Path("/dev/input/event7"), "event7"),
+    ]
+    caps = {
+        hotkey.ecodes.EV_KEY: [
+            hotkey.ecodes.KEY_GRAVE,
+            hotkey.ecodes.KEY_ENTER,
+            hotkey.ecodes.KEY_SPACE,
+        ]
+    }
+    monkeypatch.setattr(hotkey, "list_input_devices", lambda: links)
+    monkeypatch.setattr(hotkey, "open_device", lambda p: _FakeDevWithPhys(caps, ""))
+
+    assert [str(p) for p in hotkey.find_keyboards("auto")] == [
+        "/dev/input/event4",
+        "/dev/input/event7",
+    ]
+
+
+def test_two_interfaces_of_one_keyboard_are_watched_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # evdev gives both nodes the same physical path up to inputN. Watching both
+    # would deliver every keystroke twice.
+    kbd = {
+        hotkey.ecodes.EV_KEY: [
+            hotkey.ecodes.KEY_GRAVE,
+            hotkey.ecodes.KEY_ENTER,
+            hotkey.ecodes.KEY_SPACE,
+        ]
+    }
+    # one interface has a by-id link, the other is only visible as a bare
+    # event node, so the names say nothing about them being the same keyboard
+    links = [
+        (Path("/dev/input/event4"), "usb-Vendor_Kbd-event-kbd"),
+        (Path("/dev/input/event6"), "event6"),
+    ]
+    monkeypatch.setattr(hotkey, "list_input_devices", lambda: links)
+    monkeypatch.setattr(
+        hotkey,
+        "open_device",
+        lambda p: _FakeDevWithPhys(
+            kbd,
+            "usb-0000:00:14.0-2/input0" if "event4" in str(p)
+            else "usb-0000:00:14.0-2/input1",
+        ),
+    )
+
+    assert [str(p) for p in hotkey.find_keyboards("auto")] == ["/dev/input/event4"]
+
+
+def test_two_different_keyboards_are_both_watched(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # the laptop and an external one must not collapse into a single device
+    kbd = {
+        hotkey.ecodes.EV_KEY: [
+            hotkey.ecodes.KEY_GRAVE,
+            hotkey.ecodes.KEY_ENTER,
+            hotkey.ecodes.KEY_SPACE,
+        ]
+    }
+    phys = {
+        "event4": "usb-0000:00:14.0-2/input0",
+        "event7": "isa0060:00/1/input0",
+    }
+    links = [
+        (Path("/dev/input/event4"), "usb-Vendor_Kbd-event-kbd"),
+        (Path("/dev/input/event7"), "i2c-I2C-HID-event-kbd"),
+    ]
+    monkeypatch.setattr(hotkey, "list_input_devices", lambda: links)
+    monkeypatch.setattr(
+        hotkey, "open_device", lambda p: _FakeDevWithPhys(kbd, phys[p.name])
+    )
+
+    assert [str(p) for p in hotkey.find_keyboards("auto")] == [
+        "/dev/input/event4",
+        "/dev/input/event7",
+    ]
+
+
+def test_device_group_falls_back_to_the_name_without_phys() -> None:
+    # an old kernel or a driver that reports no phys must still group sensibly
+    dev = _FakeDevWithPhys({}, "")
+    assert hotkey.device_group(dev, "usb-Vendor_Kbd-event-kbd", Path("/dev/input/event4")) == (
+        "usb-Vendor_Kbd"
+    )
+    assert hotkey.device_group(dev, "event4", Path("/dev/input/event4")) == "event4"

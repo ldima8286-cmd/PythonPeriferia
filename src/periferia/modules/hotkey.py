@@ -26,6 +26,8 @@ except ImportError:  # pragma: no cover
 log = logging.getLogger(__name__)
 
 BY_ID = Path("/dev/input/by-id")
+BY_PATH = Path("/dev/input/by-path")
+INPUT = Path("/dev/input")
 
 
 def _fd_alive(dev: Any) -> bool:
@@ -84,22 +86,41 @@ def key_label(code: int) -> str:
 
 
 def list_input_devices() -> list[tuple[Path, str]]:
-    """Return (event node, readable name) for every keyboard-ish device."""
-    if not BY_ID.is_dir():
-        return []
+    """Return (event node, readable name) for every input device we could use.
+
+    /dev/input/by-id alone is not enough. A USB keyboard without a serial number
+    gets no by-id symlink at all, so scanning only that directory silently drops
+    it: the daemon then listens to the laptop keyboard and the external one
+    looks broken, with no error anywhere to explain why. by-path and the bare
+    event nodes are scanned as well, and what each node really is gets decided
+    by opening it, not by guessing from its file name.
+    """
     found: list[tuple[Path, str]] = []
     seen: set[Path] = set()
-    for link in sorted(BY_ID.iterdir()):
-        name = link.name
-        if "-event-kbd" in name or "keyboard" in name.lower() or "-event-if" in name:
+
+    def add(target: Path, name: str) -> None:
+        if target in seen or not target.exists():
+            return
+        seen.add(target)
+        found.append((target, name))
+
+    for directory, wanted in ((BY_ID, True), (BY_PATH, False)):
+        if not directory.is_dir():
+            continue
+        for link in sorted(directory.iterdir()):
+            name = link.name
+            if wanted and not (
+                "-event-kbd" in name or "keyboard" in name.lower() or "-event-if" in name
+            ):
+                continue
             try:
-                target = link.resolve()
+                add(link.resolve(), name)
             except OSError:
                 continue
-            if target in seen or not target.exists():
-                continue
-            seen.add(target)
-            found.append((target, name))
+
+    if INPUT.is_dir():
+        for node in sorted(INPUT.glob("event*")):
+            add(node, node.name)
     return found
 
 
@@ -208,6 +229,20 @@ def physical_device_id(by_id_name: str) -> str:
     return name
 
 
+def device_group(dev: Any, name: str, path: Path) -> str:
+    """One key per physical device, so a keyboard is not watched twice.
+
+    evdev reports the physical path of the device. Its HID and boot protocol
+    nodes share everything up to the trailing inputN, which is exactly the part
+    that says "same keyboard", and unlike a file name it is available even when
+    the device has no by-id symlink to name it by.
+    """
+    phys = str(getattr(dev, "phys", "") or "").strip()
+    if phys:
+        return re.sub(r"/input\d+.*$", "", phys)
+    return physical_device_id(name) or str(path)
+
+
 def find_keyboards(
     preferred: str = "auto", *, include_pointers: bool = False
 ) -> list[Path]:
@@ -243,10 +278,6 @@ def find_keyboards(
     found: list[Path] = []
     seen: set[str] = set()
     for target, name in list_input_devices():
-        device_id = physical_device_id(name)
-        if device_id in seen:
-            log.debug("skipping %s, same device as an already accepted node", target)
-            continue
         try:
             dev = open_device(target)
         except OSError as exc:
@@ -254,12 +285,20 @@ def find_keyboards(
             continue
         try:
             usable = is_keyboard(dev) or (include_pointers and is_pointer(dev))
+            if not usable:
+                continue
+            group = device_group(dev, name, target)
         finally:
             with contextlib.suppress(OSError):
                 dev.close()
-        if not usable:
+        if group in seen:
+            log.info(
+                "skipping %s, %s is another interface of a device already watched",
+                target,
+                name,
+            )
             continue
-        seen.add(device_id)
+        seen.add(group)
         found.append(target)
     return found
 

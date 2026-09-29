@@ -89,6 +89,7 @@ fi
 
 declare -A seen=()
 pairs=()
+example_node=
 
 for link in "${links[@]}"; do
     node=$(readlink -f "$link")
@@ -109,6 +110,11 @@ for link in "${links[@]}"; do
     fi
     seen[$key]=1
     pairs+=("$key|$(basename "$link")")
+    # Kept for the hint printed after install, so it names a keyboard node
+    # that was actually matched instead of a hardcoded one.
+    if [ -z "$example_node" ]; then
+        example_node="$node"
+    fi
     say "found $key  ($(basename "$link"))"
 done
 
@@ -176,7 +182,9 @@ if [ "$install" -eq 1 ]; then
     echo "installed $dest and re-triggered the input subsystem" >&2
     echo >&2
     echo "Now check whether the access appeared:" >&2
-    echo "  getfacl -p /dev/input/event5 2>/dev/null | grep -q \"\$(id -un)\" && echo 'ACL present' || echo 'no ACL yet'" >&2
+    if [ -n "$example_node" ]; then
+        echo "  getfacl -p '$example_node' | grep -q \"\$(id -un)\" && echo 'ACL present' || echo 'no ACL yet'" >&2
+    fi
     echo "  periferia check" >&2
     echo >&2
     echo "If the ACL is still missing, log out and back in: uaccess is applied" >&2

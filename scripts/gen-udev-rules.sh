@@ -7,18 +7,38 @@
 #
 # Run this only if "periferia check" says the devices are not accessible.
 #
-#   bash scripts/gen-udev-rules.sh            # print the rule
-#   bash scripts/gen-udev-rules.sh COMPANY    # only devices whose name matches
-#   bash scripts/gen-udev-rules.sh --install  # write it and reload udev
+#   bash scripts/gen-udev-rules.sh [PATTERN...] [--install]
 #
-# Pass substrings to narrow it down. Without them every keyboard and every
-# extra input interface is included, which usually means the mouse as well.
+#   PATTERN     keep only devices whose by-id name contains PATTERN
+#   --install   write the rule and reload udev (asks for sudo)
+#
+# Without a pattern every keyboard and every extra input interface is
+# included, which usually means the mouse as well. Flags and patterns may be
+# given in any order.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
 BY_ID=${PERIFERIA_BY_ID:-/dev/input/by-id}
 say() { printf '\033[1m==>\033[0m %s\n' "$1" >&2; }
+
+# Flags and device name patterns share the command line, so they have to be
+# pulled apart first. Checking only $1 meant "--install" after a pattern was
+# treated as another pattern, and the rule was printed instead of installed.
+install=0
+patterns=()
+for arg in "$@"; do
+    case "$arg" in
+        --install) install=1 ;;
+        -h|--help)
+            sed -n '2,16p' "$0" | sed 's/^# \{0,1\}//'
+            exit 0
+            ;;
+        -*) echo "error: unknown option $arg" >&2; exit 1 ;;
+        *) patterns+=("$arg") ;;
+    esac
+done
+set -- "${patterns[@]+"${patterns[@]}"}"
 
 if [ ! -d "$BY_ID" ]; then
     echo "error: $BY_ID does not exist." >&2
@@ -122,7 +142,7 @@ $rule
 EOF
 )
 
-if [ "${1:-}" = "--install" ]; then
+if [ "$install" -eq 1 ]; then
     dest=/etc/udev/rules.d/10-periferia.rules
     if command -v rpm-ostree >/dev/null 2>&1; then
         # /etc is owned by the image on an ostree system, so the override has
@@ -160,6 +180,6 @@ else
 
 Not installed. Run with --install to write it, or review it first:
 
-  bash scripts/gen-udev-rules.sh --install
+  bash scripts/gen-udev-rules.sh${patterns:+ ${patterns[*]}} --install
 EOF
 fi

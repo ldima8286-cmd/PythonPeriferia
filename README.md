@@ -76,7 +76,7 @@ a pass or a fail rather than a wall of log output:
 | 8 | the three ramp curves, timed |
 | 9 | the configuration actually in effect |
 
-The three marked in bold need you: hold the key, press the panic key, or lock
+Checks 5, 6 and 7 need you: hold the key, press the panic key, or lock
 the session from another terminal. The rest are automatic, and `a` runs
 everything that needs no input.
 

@@ -46,11 +46,27 @@ def test_fit_never_overflows_the_width() -> None:
     assert tui.fit("abcdef", 1) == "a"
 
 
+class _FakeDaemon:
+    """Records the events the daemon would report, so a test can inject them."""
+
+    def __init__(self) -> None:
+        self.log: list[tuple[float, str]] = []
+        self.clock = 0.0
+
+    def add(self, name: str) -> None:
+        self.clock += 1.0
+        self.log.append((self.clock, name))
+
+    def events(self, name: str, since: float = 0.0) -> list[float]:
+        return [t for t, n in reversed(self.log) if n == name and t >= since]
+
+
 class _FakeApp:
     """Stands in for App, with a volume the test controls."""
 
     def __init__(self, volume: float | None = None) -> None:
         self.volume = volume
+        self.daemon = _FakeDaemon()
         self.cfg = _cfg()
         self.mic = _Mic()
         self.heading = ""
@@ -157,31 +173,75 @@ def test_gate_check_fails_when_the_peak_is_low() -> None:
     assert "peak 20% of 100% target" in lines
 
 
-def test_panic_check_reports_the_time_it_took() -> None:
-    app = _FakeApp(volume=0.0)
-    check = CheckPanic()
+def _arm_panic(app: _FakeApp, check: CheckPanic) -> None:
     check.enter(app)
-    now = 0.0
-    for _ in range(3):
-        check.update(app, now)
-        now += 0.05
-    assert check.phase == "need_open"
-
-    app.volume = 1.0  # key held
-    for _ in range(3):
-        check.update(app, now)
-        now += 0.05
+    check.update(app, 0.0)  # mic closed, nothing yet
+    app.volume = 1.0
+    check.update(app, 0.1)  # key held
     assert check.phase == "armed"
 
-    app.volume = 0.0  # panic dropped it
-    for _ in range(4):
-        check.update(app, now)
-        now += 0.02
+
+def test_panic_check_measures_the_drop_after_a_panic_event(monkeypatch) -> None:
+    app = _FakeApp(volume=0.0)
+    check = CheckPanic()
+    _arm_panic(app, check)
+
+    clock = [100.0]
+    monkeypatch.setattr("src.periferia.tui.time.monotonic", lambda: clock[0])
+    check.armed_at = 99.9
+    app.daemon.log.append((99.95, "panic"))  # at or after armed_at
+    check.update(app, 0.2)
+    assert check.phase == "checking"
+    assert check.saw_panic
+
+    clock[0] = 100.02
+    app.volume = 0.0
+    check.update(app, 0.3)
     assert check.finished
+    assert check.closed
+    assert check.drop_ms is not None and check.drop_ms < 120
 
     lines = "\n".join(check.render(app, 80))
     assert "panic closed the microphone" in lines
     assert "hold_ms is 200" in lines
+
+
+def test_panic_check_fails_when_the_mic_closes_without_a_panic(monkeypatch) -> None:
+    # the key was simply released: the volume drops, but panic never fired, and
+    # calling that a pass would be a lie
+    app = _FakeApp(volume=0.0)
+    check = CheckPanic()
+    _arm_panic(app, check)
+
+    clock = [100.0]
+    monkeypatch.setattr("src.periferia.tui.time.monotonic", lambda: clock[0])
+    check.armed_at = 99.0
+    app.volume = 0.0  # released, no panic event anywhere
+
+    check.update(app, 0.2)
+    assert check.phase == "armed"  # still waiting, not a pass
+
+    clock[0] = 120.0  # patience runs out
+    check.update(app, 0.3)
+    assert check.finished
+    assert check.saw_panic is False
+
+    lines = "\n".join(check.render(app, 80))
+    assert "no panic event was seen" in lines
+    assert "panic never fired" in lines
+
+
+def test_panic_check_ignores_a_stale_event(monkeypatch) -> None:
+    # a panic from before the hold started must not satisfy the check
+    app = _FakeApp(volume=0.0)
+    check = CheckPanic()
+    app.daemon.add("panic")
+    _arm_panic(app, check)
+
+    monkeypatch.setattr("src.periferia.tui.time.monotonic", lambda: 100.0)
+    check.update(app, 0.2)
+    assert check.saw_panic is False
+    assert check.phase == "armed"
 
 
 def test_escape_leaves_a_check() -> None:

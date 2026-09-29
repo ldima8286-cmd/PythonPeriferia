@@ -7,6 +7,7 @@ import signal
 import sys
 import threading
 import time
+from collections import deque
 from types import FrameType
 
 from ..modules.audio import VirtualMic
@@ -38,6 +39,26 @@ class Daemon:
         self._lock: SessionLockWatcher | None = None
         self._stop = threading.Event()
         self._listener: HotkeyListener | None = None
+        # Timestamps of the last few state changes, so a caller can tell what
+        # actually happened instead of inferring it from the output. Written
+        # from the listener thread, read from anywhere.
+        self._events: deque[tuple[float, str]] = deque(maxlen=64)
+        self._events_lock = threading.Lock()
+
+    def _record(self, name: str) -> float:
+        now = time.monotonic()
+        with self._events_lock:
+            self._events.append((now, name))
+        return now
+
+    def events(self, name: str, since: float = 0.0) -> list[float]:
+        """Timestamps of a named event at or after 'since', newest first.
+
+        Both use time.monotonic, so a caller can hand in the moment it started
+        watching and get back only what happened after that.
+        """
+        with self._events_lock:
+            return [t for t, n in reversed(self._events) if n == name and t >= since]
 
     def setup(self) -> bool:
         if not self.cfg.audio.enabled:
@@ -121,21 +142,24 @@ class Daemon:
     def on_press(self) -> None:
         log.info("ptt down -> mic open")
         self._release_at = None
-        self._pressed_at = time.monotonic()
+        self._pressed_at = self._record("press")
         self.mic.open_mic()
 
     def on_release(self) -> None:
+        self._record("release")
         self._pressed_at = None
         hold = max(0, self.cfg.audio.hold_ms) / 1000.0
         self._release_at = time.monotonic() + hold
 
     def on_panic(self) -> None:
         log.warning("panic pressed")
+        self._record("panic")
         self._release_at = None
         self.mic.panic()
 
     def on_session_locked(self) -> None:
         """Close the microphone without waiting for a key that may not come."""
+        self._record("lock")
         self.force_release("session locked")
 
     def force_release(self, why: str) -> None:

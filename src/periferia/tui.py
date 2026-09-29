@@ -369,15 +369,23 @@ class CheckGate(Check):
 
 
 class CheckPanic(Check):
+    """Panic has to be proven by a panic event, not by a quiet microphone.
+
+    A normal release also drops the volume to zero, so watching the level would
+    pass even with the panic key unbound. That is worse than no check at all: it
+    reports a feature working that does not.
+    """
+
     key = "6"
     title = "Panic key"
 
     def reset(self) -> None:
         super().reset()
         self.phase = "need_open"
-        self.triggered = 0.0
+        self.armed_at = 0.0
         self.drop_ms: float | None = None
-        self.was_open = False
+        self.closed = False
+        self.saw_panic = False
 
     def enter(self, app: App) -> None:
         super().enter(app)
@@ -390,42 +398,55 @@ class CheckPanic(Check):
         fraction = app.sample_volume()
         open_now = fraction is not None and fraction > 0.5
         if self.phase == "need_open":
-            self.was_open = self.was_open or open_now
-            if self.was_open:
+            if open_now:
                 self.phase = "armed"
+                # ignore anything that fired before the hold started
+                self.armed_at = time.monotonic()
             return
         if self.phase == "armed":
-            if not self.was_open or open_now:
-                return
-            self.triggered = now
-            self.phase = "checking"
-        if self.phase == "checking":  # noqa: SIM102
-            if fraction is not None and fraction < 0.02:
-                self.drop_ms = (now - self.triggered) * 1000.0
+            if app.daemon is not None and app.daemon.events("panic", self.armed_at):
+                self.saw_panic = True
+                self.phase = "checking"
+            elif not open_now and self.patience_left(app) <= 0.0:
+                # the gate closed with no panic behind it: that is a release
                 self.phase = "done"
                 self.finished = True
+            return
+        if self.phase == "checking" and fraction is not None and fraction < 0.02:
+            self.closed = True
+            self.drop_ms = (time.monotonic() - self.armed_at) * 1000.0
+            self.phase = "done"
+            self.finished = True
+
+    def patience_left(self, app: App) -> float:
+        """How long to keep waiting before calling an uneventful hold a miss."""
+        return max(0.0, 12.0 - (time.monotonic() - self.armed_at))
 
     def render(self, app: App, width: int) -> list[str]:
-        fraction = app.sample_volume()
-        if self.phase == "done":
+        if not self.saw_panic:
             return [
-                verdict_line(True, "panic closed the microphone", "volume is 0%"),
                 verdict_line(
-                    self.drop_ms is not None and self.drop_ms < 120,
-                    "closed without waiting for hold_ms",
-                    f"took {self.drop_ms:.0f} ms, hold_ms is {app.cfg.audio.hold_ms}",
+                    False,
+                    "no panic event was seen",
+                    "the microphone closed, but panic never fired",
                 ),
                 "",
-                "Panic is instant and does not respect the hold time. Esc returns.",
+                f"Panic key is {app.cfg.ptt.panic_key or 'unset'}.",
+                "If the volume went to zero, the PTT key was released "
+                "instead of the panic key being pressed.",
+                "Press 6 again and hold PTT, then press the panic key.",
             ]
-        hint = {
-            "need_open": "hold the PTT key first, the microphone must be open",
-            "armed": "now press the panic key, keep holding PTT",
-            "checking": "panic seen, waiting for the level to fall",
-        }[self.phase]
         return [
-            f"  {BOLD}{hint}{RESET}",
-            f"  {volume_bar(fraction)} {0 if fraction is None else f'{fraction:.0%}'}",
+            verdict_line(self.closed, "panic closed the microphone", "volume is 0%"),
+            verdict_line(
+                self.closed and self.drop_ms is not None and self.drop_ms < 120,
+                "closed without waiting for hold_ms",
+                f"took {self.drop_ms:.0f} ms, hold_ms is {app.cfg.audio.hold_ms}"
+                if self.drop_ms is not None
+                else "microphone is still open",
+            ),
+            "",
+            "Esc returns to the menu.",
         ]
 
 
@@ -437,6 +458,7 @@ class CheckLock(Check):
         super().reset()
         self.phase = "need_open"
         self.closed_after_lock: bool | None = None
+        self.locked_at = 0.0
 
     def enter(self, app: App) -> None:
         super().enter(app)
@@ -450,6 +472,7 @@ class CheckLock(Check):
 
     def _on_lock(self) -> None:
         self.phase = "locked"
+        self.locked_at = time.monotonic()
 
     def update(self, app: App, now: float) -> None:
         if self.finished:
@@ -460,12 +483,18 @@ class CheckLock(Check):
         if self.phase == "need_open":
             if fraction is not None and fraction > 0.5:
                 self.phase = "holding"
-        elif self.phase == "holding":
-            pass
         elif self.phase == "locked":
-            self.closed_after_lock = fraction is not None and fraction < 0.02
-            self.phase = "done"
-            self.finished = True
+            # the daemon runs its own watcher, so the level will not have
+            # dropped yet on the frame the lock is noticed. Give it a moment
+            # instead of failing a feature that is working.
+            if fraction is not None and fraction < 0.02:
+                self.closed_after_lock = True
+                self.phase = "done"
+                self.finished = True
+            elif time.monotonic() - self.locked_at > 2.0:
+                self.closed_after_lock = False
+                self.phase = "done"
+                self.finished = True
 
     def on_key(self, app: App, ch: str) -> None:
         super().on_key(app, ch)

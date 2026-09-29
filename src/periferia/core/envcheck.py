@@ -88,7 +88,7 @@ def check_sources() -> list[Result]:
         virtual += int(is_virtual)
         physical += int(not is_virtual)
         tag = "virtual" if is_virtual else "physical"
-        results.append(Result(f"source", OK, f"[{tag}] {name}"))
+        results.append(Result("source", OK, f"[{tag}] {name}"))
 
     if physical == 0:
         results.append(
@@ -99,9 +99,8 @@ def check_sources() -> list[Result]:
 
 
 def check_input_access() -> list[Result]:
-    from ..modules.hotkey import list_input_devices
+    from ..modules.hotkey import list_input_devices, open_device
 
-    results = []
     devices = list_input_devices()
     if not devices:
         return [
@@ -112,21 +111,41 @@ def check_input_access() -> list[Result]:
                 "check that /dev/input/by-id exists",
             )
         ]
+
+    results: list[Result] = []
     readable = 0
+    blocked: list[str] = []
+
     for path, name in devices:
-        node = str(path)
-        ok = os.access(node, os.R_OK | os.W_OK)
-        readable += int(ok)
+        try:
+            dev = open_device(path)
+        except Exception as exc:
+            blocked.append(name)
+            reason = exc.strerror if isinstance(exc, OSError) and exc.strerror else str(exc)
+            results.append(Result(f"input:{name}", WARN, f"cannot open: {reason}"))
+            continue
+        dev.close()
+        readable += 1
+        results.append(Result(f"input:{name}", OK, "openable for reading"))
+
+    if readable == 0:
         results.append(
             Result(
-                f"input:{name}",
-                OK if ok else WARN,
-                f"{node} {'readable' if ok else 'no access'}",
-                "" if ok else "logind usually grants this; if not, see docs/udev.md",
+                "input",
+                FAIL,
+                "no device can be opened",
+                "evdev cannot borrow logind access; a udev rule is required, see docs/udev.md",
             )
         )
-    if readable == 0:
-        results.append(Result("input", FAIL, "no device is accessible", "see docs/udev.md"))
+    elif readable < len(devices):
+        results.append(
+            Result(
+                "input",
+                WARN,
+                f"{readable} of {len(devices)} device(s) readable",
+                "some devices are blocked; see docs/udev.md",
+            )
+        )
     return results
 
 

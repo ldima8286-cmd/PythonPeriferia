@@ -46,7 +46,6 @@ class PttConfig:
     panic_key: str = "KEY_F12"
     device: str = "auto"
     ignore_repeat: bool = True
-    release_on_focus_loss: bool = True
 
     enabled: bool = True
 
@@ -117,7 +116,7 @@ def _build(cls: type, data: Any) -> Any:
         raise ValueError(f"expected a mapping for {cls.__name__}, got {type(data).__name__}")
 
     fields = {f.name for f in dataclasses.fields(cls)}
-    known = {k: v for k, v in data.items() if k in fields and k != "enabled"}
+    known = {k: v for k, v in data.items() if k in fields}
     unknown = set(data) - fields
     if unknown:
         raise ValueError(f"unknown keys in {cls.__name__}: {sorted(unknown)}")

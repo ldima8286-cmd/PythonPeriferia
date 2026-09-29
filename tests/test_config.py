@@ -32,7 +32,7 @@ def test_build_rejects_unknown_keys() -> None:
         config_mod._build(config_mod.AudioConfig, {"attack_msec": 5})
 
 
-def test_build_ignores_enabled_toggle() -> None:
+def test_build_applies_enabled_toggle() -> None:
     cfg = config_mod._build(config_mod.AudioConfig, {"enabled": False})
     assert cfg.enabled is False
 

@@ -45,8 +45,6 @@ ptt:
   # Ignore key auto-repeat. Keep true, otherwise the key sticks when held.
   ignore_repeat: true
 
-  release_on_focus_loss: true
-
   enabled: true
 
 processing:

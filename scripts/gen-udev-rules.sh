@@ -8,12 +8,16 @@
 # Run this only if "periferia check" says the devices are not accessible.
 #
 #   bash scripts/gen-udev-rules.sh            # print the rule
+#   bash scripts/gen-udev-rules.sh COMPANY    # only devices whose name matches
 #   bash scripts/gen-udev-rules.sh --install  # write it and reload udev
+#
+# Pass substrings to narrow it down. Without them every keyboard and every
+# extra input interface is included, which usually means the mouse as well.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
-BY_ID=/dev/input/by-id
+BY_ID=${PERIFERIA_BY_ID:-/dev/input/by-id}
 say() { printf '\033[1m==>\033[0m %s\n' "$1" >&2; }
 
 if [ ! -d "$BY_ID" ]; then
@@ -27,6 +31,36 @@ mapfile -t links < <(
     find "$BY_ID" -maxdepth 1 -type l \
         \( -name '*-event-kbd' -o -name '*-event-if*' \) 2>/dev/null | sort
 )
+
+# The dedup below keeps the first link per vendor:product, so a keyboard has
+# to be considered before the other interfaces of the same device. Sorting
+# "event-if02" ahead of "event-kbd" used to label the rule after the wrong
+# interface.
+if [ "${#links[@]}" -gt 0 ]; then
+    mapfile -t links < <(
+        printf '%s\n' "${links[@]}" | awk '/event-kbd/ {kbd = kbd $0 "\n"; next} {other = other $0 "\n"} END {printf "%s%s", kbd, other}'
+    )
+fi
+
+if [ "$#" -gt 0 ]; then
+    filtered=()
+    for link in "${links[@]}"; do
+        base=$(basename "$link")
+        for pattern in "$@"; do
+            case "$base" in
+                *"$pattern"*) filtered+=("$link"); break ;;
+            esac
+        done
+    done
+    if [ "${#filtered[@]}" -eq 0 ]; then
+        echo "error: no device matches: $*" >&2
+        echo "available:" >&2
+        printf '  %s\n' "${links[@]##*/}" >&2
+        exit 1
+    fi
+    links=("${filtered[@]}")
+    say "filter: $# (matching: ${links[*]##*/})"
+fi
 
 if [ "${#links[@]}" -eq 0 ]; then
     echo "error: no keyboard-like devices in $BY_ID" >&2

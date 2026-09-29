@@ -149,3 +149,59 @@ def test_the_watch_is_set_up_on_the_system_bus(monkeypatch: pytest.MonkeyPatch) 
     assert "--system" in started[0]
     assert "--session" not in started[0]
     watcher.stop()
+
+
+def test_it_falls_back_to_our_own_session(monkeypatch: pytest.MonkeyPatch) -> None:
+    # XDG_SESSION_ID is missing from plenty of ordinary launches. Asking logind
+    # which session owns this process always works, and silently losing lock
+    # protection is worse than one extra call.
+    calls: list[str] = []
+
+    class _Proc:
+        stdout = "(('/org/freedesktop/login1/session/_7', 'user'))"
+        stderr = ""
+        returncode = 0
+
+    def _run(cmd: list[str], **kwargs: object) -> _Proc:
+        calls.append(cmd[cmd.index("--method") + 1])
+        return _Proc()
+
+    monkeypatch.delenv("XDG_SESSION_ID", raising=False)
+    monkeypatch.setattr(sessionlock.subprocess, "run", _run)
+
+    assert sessionlock.session_object_path() == "/org/freedesktop/login1/session/_7"
+    assert calls == [sessionlock.GET_SESSION_BY_PID]
+
+
+def test_it_falls_back_when_get_session_is_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
+    seen: list[str] = []
+
+    class _Proc:
+        stdout = ""
+        stderr = "No such session"
+        returncode = 1
+
+    class _Good:
+        stdout = "(('/org/freedesktop/login1/session/_9', 'user'))"
+        stderr = ""
+        returncode = 0
+
+    def _run(cmd: list[str], **kwargs: object) -> _Proc:
+        method = cmd[cmd.index("--method") + 1]
+        seen.append(method)
+        return _Good() if method == sessionlock.GET_SESSION_BY_PID else _Proc()
+
+    monkeypatch.setenv("XDG_SESSION_ID", "999")
+    monkeypatch.setattr(sessionlock.subprocess, "run", _run)
+
+    assert sessionlock.session_object_path() == "/org/freedesktop/login1/session/_9"
+    assert seen == [sessionlock.GET_SESSION, sessionlock.GET_SESSION_BY_PID]
+
+
+def test_the_watcher_explains_itself_when_it_cannot_start(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(sessionlock, "session_object_path", lambda *a, **k: None)
+    watcher = sessionlock.SessionLockWatcher(lambda: None)
+    assert watcher.start() is False
+    assert watcher.reason

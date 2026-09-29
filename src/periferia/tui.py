@@ -561,7 +561,10 @@ class CheckLock(Check):
         app.note = self.lock_hint
         self.watcher = SessionLockWatcher(self._on_lock)
         if not self.watcher.start():
-            app.note = "gdbus is unavailable, this check cannot run here"
+            # Do not invent a cause. "gdbus is unavailable" was shown for every
+            # failure, including logind answering perfectly well on the wrong
+            # bus, which is what sent the hunt in the wrong direction twice.
+            app.note = self.watcher.reason or "screen lock detection is unavailable"
             self.phase = "done"
             self.finished = True
 

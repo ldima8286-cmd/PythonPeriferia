@@ -29,6 +29,7 @@ GET_SESSION = "org.freedesktop.login1.Manager.GetSession"
 # with "The name is not activatable", which is what silently turned screen
 # lock protection off on a machine that has it.
 BUS_FLAG = "--system"
+GET_SESSION_BY_PID = "org.freedesktop.login1.Manager.GetSessionByPID"
 
 
 def parse_lock_hint(line: str) -> bool | None:
@@ -50,16 +51,7 @@ def parse_lock_hint(line: str) -> bool | None:
     return None
 
 
-def session_object_path(command: str = "gdbus") -> str | None:
-    """Ask logind for this session's object path.
-
-    The name contains a leading underscore, for example _32 for session 32,
-    so it cannot be guessed and has to be asked for.
-    """
-    session_id = os.environ.get("XDG_SESSION_ID", "")
-    if not session_id:
-        log.info("no XDG_SESSION_ID, screen lock detection is unavailable")
-        return None
+def _call(command: str, method: str, argument: str) -> str | None:
     try:
         proc = subprocess.run(
             [
@@ -71,8 +63,8 @@ def session_object_path(command: str = "gdbus") -> str | None:
                 "--object-path",
                 MANAGER_PATH,
                 "--method",
-                GET_SESSION,
-                session_id,
+                method,
+                argument,
             ],
             capture_output=True,
             text=True,
@@ -83,13 +75,34 @@ def session_object_path(command: str = "gdbus") -> str | None:
         log.info("cannot reach logind for the session path: %s", exc)
         return None
     if proc.returncode != 0:
-        log.info("logind GetSession failed: %s", (proc.stderr or "").strip())
+        log.info(
+            "logind %s failed: %s",
+            method.rsplit(".", 1)[-1],
+            (proc.stderr or "").strip(),
+        )
         return None
     out = proc.stdout.strip().strip("()")
     parts = [p.strip().strip("'\"") for p in out.split(",")]
     if not parts or not parts[0].startswith("/"):
         return None
     return parts[0]
+
+
+def session_object_path(command: str = "gdbus") -> str | None:
+    """Ask logind for this session's object path.
+
+    The name contains a leading underscore, for example _32 for session 32,
+    so it cannot be guessed and has to be asked for.
+    """
+    session_id = os.environ.get("XDG_SESSION_ID", "")
+    if session_id:
+        found = _call(command, GET_SESSION, session_id)
+        if found:
+            return found
+        log.info("falling back to the session that owns this process")
+    # XDG_SESSION_ID is missing from plenty of ordinary launches, and quietly
+    # losing screen lock protection is worse than making one more call.
+    return _call(command, GET_SESSION_BY_PID, str(os.getpid()))
 
 
 class SessionLockWatcher:
@@ -105,6 +118,7 @@ class SessionLockWatcher:
         self.command = command
         self._proc: subprocess.Popen[str] | None = None
         self._locked = False
+        self.reason = ""
 
     @property
     def available(self) -> bool:
@@ -114,6 +128,7 @@ class SessionLockWatcher:
         """Begin watching. Returns False when it could not be set up."""
         path = session_object_path(self.command)
         if path is None:
+            self.reason = "logind did not tell us which session this is"
             return False
         try:
             self._proc = subprocess.Popen(
@@ -133,6 +148,7 @@ class SessionLockWatcher:
             )
         except OSError as exc:
             log.info("cannot start gdbus monitor: %s", exc)
+            self.reason = f"cannot start {self.command} monitor: {exc}"
             self._proc = None
             return False
         log.info("watching screen lock on %s", path)

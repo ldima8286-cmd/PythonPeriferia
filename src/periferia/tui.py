@@ -517,7 +517,11 @@ class CheckPanic(Check):
 
 class CheckLock(Check):
     key = "7"
-    title = "Screen lock"
+    title = "Screen lock (locks your display)"
+    lock_hint = (
+        "There is no key for this. Periferia watches the session lock signal "
+        "from the system, so the screen has to be locked for real."
+    )
     timeout = 120.0
 
     def reset(self) -> None:
@@ -529,11 +533,7 @@ class CheckLock(Check):
     def enter(self, app: App) -> None:
         super().enter(app)
         app.heading = "Screen lock"
-        app.note = (
-            "hold PTT, then lock the screen from another terminal. "
-            "Do not press any key here, and do not press the panic key: "
-            "it would close the microphone for the wrong reason."
-        )
+        app.note = self.lock_hint
         self.watcher = SessionLockWatcher(self._on_lock)
         if not self.watcher.start():
             app.note = "gdbus is unavailable, this check cannot run here"
@@ -592,8 +592,13 @@ class CheckLock(Check):
         return [
             f"  {BOLD}{hint}{RESET}",
             f"  {level_line(app)}",
-            f"  {DIM}in the other terminal run:  loginctl lock-session{RESET}",
-            f"  {DIM}press nothing here. F12 is the panic key, not the lock key{RESET}",
+            "",
+            f"  {DIM}There is no lock key to press.{RESET}",
+            f"  {DIM}On KDE press  Ctrl+Alt+L  on this screen.{RESET}",
+            f"  {DIM}Or in another terminal:  loginctl lock-session{RESET}",
+            "",
+            f"  {DIM}Press nothing here. F12 is the panic key, and pressing it{RESET}",
+            f"  {DIM}would close the microphone for the wrong reason.{RESET}",
         ]
 
 

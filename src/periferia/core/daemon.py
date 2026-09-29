@@ -17,6 +17,7 @@ from ..modules.hotkey import (
     resolve_key,
 )
 from ..modules.processing import MicProcessing
+from ..modules.sessionlock import SessionLockWatcher
 from . import config as config_mod
 from . import logging_setup
 
@@ -33,6 +34,8 @@ class Daemon:
         self.mic = VirtualMic(cfg.audio)
         self.processing = MicProcessing(cfg.processing)
         self._release_at: float | None = None
+        self._pressed_at: float | None = None
+        self._lock: SessionLockWatcher | None = None
         self._stop = threading.Event()
         self._listener: HotkeyListener | None = None
 
@@ -118,9 +121,11 @@ class Daemon:
     def on_press(self) -> None:
         log.info("ptt down -> mic open")
         self._release_at = None
+        self._pressed_at = time.monotonic()
         self.mic.open_mic()
 
     def on_release(self) -> None:
+        self._pressed_at = None
         hold = max(0, self.cfg.audio.hold_ms) / 1000.0
         self._release_at = time.monotonic() + hold
 
@@ -128,6 +133,40 @@ class Daemon:
         log.warning("panic pressed")
         self._release_at = None
         self.mic.panic()
+
+    def on_session_locked(self) -> None:
+        """Close the microphone without waiting for a key that may not come."""
+        self.force_release("session locked")
+
+    def force_release(self, why: str) -> None:
+        """Shut the mic now and forget that the key was held.
+
+        The key itself is not grabbed, so a release event can be lost when a
+        session locks. Clearing the state here is what stops the next press
+        from being swallowed as a duplicate.
+        """
+        if self._release_at is None and self._pressed_at is None:
+            return
+        log.info("forcing the microphone closed: %s", why)
+        self._release_at = None
+        if self._listener is not None:
+            self._listener.reset_state()
+        self.mic.force_silence()
+
+    def _expire_stuck_hold(self) -> None:
+        """Last resort if a press never gets a matching release.
+
+        A key repeat storm, an unplugged receiver or a compositor bug can all
+        leave the key logically down. The design assumes the mic must not stay
+        open indefinitely, so a long hold is cut off.
+        """
+        if self._pressed_at is None:
+            return
+        limit = self.cfg.ptt.max_press_ms
+        if limit <= 0:
+            return
+        if time.monotonic() - self._pressed_at >= limit / 1000.0:
+            self.force_release(f"held for more than {limit} ms")
 
     def _expire_hold(self) -> None:
         if self._release_at is None:
@@ -150,12 +189,23 @@ class Daemon:
             log.error("this usually means missing permissions, see docs/udev.md")
             return 1
 
+        if not self.cfg.ptt.release_on_lock:
+            log.info("release_on_lock is off, a locked session will not close the mic")
+        else:
+            self._lock = SessionLockWatcher(self.on_session_locked)
+            if not self._lock.start():
+                self._lock = None
+                log.info("continuing without screen lock protection")
+
         log.info("periferia is running, mic %s, press Ctrl+C to stop", self.mic.source)
 
         try:
             while not self._stop.is_set():
                 listener.poll(timeout=0.2)
+                if self._lock is not None:
+                    self._lock.poll()
                 self._expire_hold()
+                self._expire_stuck_hold()
         except KeyboardInterrupt:
             pass
         except OSError as exc:
@@ -163,6 +213,8 @@ class Daemon:
             return 1
         finally:
             listener.close()
+            if self._lock is not None:
+                self._lock.stop()
             self.mic.force_silence()
             self.processing.stop()
             self.mic.teardown()

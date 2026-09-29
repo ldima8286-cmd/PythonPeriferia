@@ -319,6 +319,11 @@ class HotkeyListener:
                 dev.close()
         self._devs.clear()
 
+    def reset_state(self) -> None:
+        """Forget that a key is held, so the next press is not a duplicate."""
+        self._down = False
+        self._panic_down = False
+
     def _drop(self, path: Path, reason: str) -> None:
         dev = self._devs.pop(path, None)
         if dev is not None:

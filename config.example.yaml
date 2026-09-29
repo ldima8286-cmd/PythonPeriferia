@@ -46,9 +46,26 @@ ptt:
   # than eventN, which can change after a reboot:
   #   ls /dev/input/by-id/
   device: auto
+  #
+  # ptt_key also accepts a mouse button, e.g. "BTN_SIDE" for a side button on a
+  # gaming mouse. A mouse is only opened when the key is one of its buttons,
+  # because reading one needs an extra udev rule that nobody should be granted
+  # by default. Run "periferia pick-key" and press the button to get the name.
 
   # Ignore key auto-repeat. Keep true, otherwise the key sticks when held.
   ignore_repeat: true
+
+  # Close the mic when the session locks. Keep true: walking away from the
+  # desk while holding the key would otherwise leave the mic open in an empty
+  # room, and a screen lock is the most likely way that happens. Needs gdbus,
+  # which every GNOME and KDE install already has. Without it the daemon says
+  # so in the log and keeps working.
+  release_on_lock: true
+
+  # Cut off a key held longer than this, in ms. 0 disables. A last resort
+  # against a press that never gets a matching release, since the key is not
+  # grabbed and events can be lost. 300000 is five minutes.
+  max_press_ms: 300000
 
   enabled: true
 

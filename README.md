@@ -115,6 +115,25 @@ reads the keyboard, it never grabs it, so your typing keeps working normally.
 | `ptt.ptt_key` | auto | physical key, see below |
 | `ptt.device` | auto | which keyboards to watch, see below |
 | `ptt.panic_key` | KEY_F12 | instant mute, ignores `hold_ms` |
+| `ptt.release_on_lock` | true | close the mic when the session locks |
+| `ptt.max_press_ms` | 300000 | cut off a key held longer than this, 0 disables |
+
+## Safety
+
+The microphone is the one thing in this program that can embarrass you, so two
+guards exist besides the key itself.
+
+`release_on_lock` closes the microphone when the session locks. Walking away
+from the desk while holding PTT would otherwise leave it transmitting in an
+empty room, and locking the screen is the most likely moment for that. It
+works by watching `org.freedesktop.login1.Session.LockHint` through `gdbus`,
+which is already installed on any GNOME or KDE system. If `gdbus` is missing
+the daemon says so in the log and carries on, because losing this protection
+must not cost you your PTT.
+
+`max_press_ms` cuts off a key held longer than five minutes. The keyboard is
+not grabbed, so events can be lost, and a press without its release would
+otherwise open the microphone for good.
 
 ## Keyboards and other input devices
 
@@ -147,6 +166,19 @@ ptt:
 
 `periferia pick-key` listens on all keyboards as well, so the key can be
 pressed on whichever one you like.
+
+A mouse button works as the PTT key too, e.g. `BTN_SIDE` for a side button on a
+gaming mouse. A mouse is only watched when the configured key is one of its
+buttons, since reading one needs an extra udev rule that should not be granted
+by default. To add it:
+
+```bash
+bash scripts/gen-udev-rules.sh "E-Signal"
+sudo bash scripts/gen-udev-rules.sh "E-Signal" --install
+sudo udevadm control --reload-rules
+```
+
+then set `ptt_key: BTN_SIDE` and restart.
 
 ## About the key names
 

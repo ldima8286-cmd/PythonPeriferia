@@ -41,22 +41,23 @@ class Daemon:
             log.error("no physical capture source found")
             return False
 
-        # Processing has to exist before the loopback is built, otherwise the
-        # loopback would copy the raw mic and the noise suppression would go
-        # nowhere.
-        capture = physical
-        if self.cfg.processing.enabled:
-            processed = self.processing.start(physical)
-            if processed:
-                capture = processed
-            else:
-                log.warning(
-                    "mic processing did not start, the virtual mic will carry the raw signal"
-                )
-
-        virtual = self.mic.setup(capture_source=capture)
+        # module-echo-cancel produces the virtual source itself. It used to be
+        # started here and then copied through a module-loopback, but the
+        # loopback created no node on WirePlumber 0.5 and the daemon died on
+        # every start. The module can name its own output, so it is the whole
+        # chain now.
+        virtual = self.processing.start(physical, name=self.cfg.audio.virtual_name)
         if not virtual:
-            log.error("could not create the virtual microphone")
+            log.warning(
+                "could not create %s, falling back to the raw %s. "
+                "The physical microphone cannot be gated, so PTT will not work",
+                self.cfg.audio.virtual_name,
+                physical,
+            )
+            virtual = physical
+
+        if not self.mic.attach(virtual):
+            log.error("could not attach the gate to %s", virtual)
             self.processing.stop()
             return False
 

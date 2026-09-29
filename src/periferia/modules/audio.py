@@ -1,15 +1,21 @@
-"""Virtual microphone and the volume gate that implements PTT.
+"""The volume gate that implements PTT.
 
-The physical microphone is never muted. A module-loopback virtual source is
-created and applications (Discord, Zoom, OBS) are pointed at that virtual one.
-PTT then only moves the virtual source's volume, so the physical device stays
-available to everything else.
+The physical microphone is never muted. PipeWire's module-echo-cancel is fed
+from it and publishes a separate virtual source, which is the one applications
+point at. PTT only moves that virtual source's volume, so the physical device
+stays available to everything else on the machine:
 
-The loopback copies from the echo-cancel output when processing is on, not from
-the raw microphone, so suppression and AEC are part of what gets recorded:
+    physical mic -> module-echo-cancel -> apps (PeriferiaMic)
+    physical mic ----------------------> apps (still works, never gated)
 
-    physical mic -> module-echo-cancel -> module-loopback -> apps
-    physical mic ---------------------> module-loopback -> apps
+A module-loopback used to sit on top of this to rename the result. It was
+removed: on WirePlumber 0.5 a loopback loaded through pactl registers a
+module id but never creates a node, so the daemon could not start at all. The
+echo-cancel module already creates the virtual source, and it accepts
+source_properties to name it, so the extra hop bought nothing.
+
+The gate uses set-source-volume rather than muting, because attack and release
+are ramps and a mute has nowhere in between.
 """
 
 from __future__ import annotations
@@ -51,13 +57,12 @@ def pick_physical_source(preferred: str = "auto") -> str | None:
 
 
 class VirtualMic:
-    """Owns the module-loopback source and exposes a smooth volume gate."""
+    """Binds a volume gate to a source someone else created."""
 
     def __init__(self, cfg: AudioConfig, *, slider: Slider | None = None) -> None:
         self.cfg = cfg
         self._slider = slider or pipewire.set_volume
         self._lock = threading.RLock()
-        self._module_id: int | None = None
         self._source: str | None = None
         self._physical: str | None = None
         self._volume = 0.0
@@ -87,83 +92,22 @@ class VirtualMic:
             self._physical = pick_physical_source(self.cfg.physical_source)
         return self._physical
 
-    def setup(self, capture_source: str | None = None) -> str | None:
-        """Create the virtual source. Idempotent.
+    def attach(self, source: str | None) -> str | None:
+        """Bind the gate to an already created source.
 
-        capture_source is what the loopback copies from. Normally that is the
-        physical microphone, but when mic processing is enabled the daemon
-        passes the echo-cancel output instead, so suppression and AEC end up in
-        the source applications record.
+        This class no longer builds any PipeWire module. The source comes from
+        MicProcessing, which publishes the echo-cancel output under the name
+        applications look for. Loading a module-loopback here looked reasonable
+        but never produced a node on WirePlumber 0.5.
         """
         with self._lock:
-            if self._source and pipewire.source_exists(self._source):
-                return self._source
-
-            existing = pipewire.find_source(self.cfg.virtual_name)
-            if existing:
-                log.info("reusing existing source %s", existing)
-                self._source = existing
-                self._volume = 0.0
-                self._apply(0.0)
-                return existing
-
-            capture = capture_source or self.pick_physical()
-            if not capture:
-                log.error("no physical capture source found")
+            if not source:
                 return None
-            if not self._physical:
-                self._physical = pick_physical_source(self.cfg.physical_source)
-
-            # module-loopback 1.6 documents source= as the node the virtual
-            # source is connected to, and source_output_properties= (not
-            # source_properties=, which it does not know) as the way to name
-            # that source. Passing the wrong property name made the module
-            # register while creating no ports at all.
-            args = [
-                f"source={capture}",
-                f"source_output_properties=device.description={self.cfg.virtual_name}",
-                "latency_msec=20",
-            ]
-            module_id = pipewire.load_module("module-loopback", args)
-            if module_id is None:
-                log.error("module-loopback refused to load")
-                return None
-            self._module_id = module_id
-
-            self._source = self._find_loopback_source(module_id)
-            if not self._source:
-                log.error("loopback loaded but its source could not be found")
-                log.error(
-                    "the module registered but PipeWire never created its ports. "
-                    "Check 'pactl list short modules' for the entry and 'pactl list "
-                    "short sources' for what it produced; if the loopback is there "
-                    "but empty, the capture device it was pointed at is probably "
-                    "unavailable, and 'periferia devices' will show what is visible"
-                )
-                pipewire.unload_module(module_id)
-                self._module_id = None
-                return None
-
-            if capture == self._physical:
-                log.info("virtual mic %s <- %s", self._source, capture)
-            else:
-                log.info("virtual mic %s <- %s (processed)", self._source, capture)
+            self._source = source
+            self._volume = 0.0
             self._apply(0.0)
-            return self._source
-
-    def _find_loopback_source(self, module_id: int, timeout: float = 2.0) -> str | None:
-        """module-loopback creates its ports asynchronously, so right after
-        pactl load-module the source is often missing from pactl's output for a
-        moment. Give it time to appear instead of failing the whole daemon.
-        """
-        deadline = time.monotonic() + timeout
-        while True:
-            found = pipewire.source_by_module(module_id)
-            if found:
-                return found
-            if time.monotonic() >= deadline:
-                return None
-            time.sleep(0.15)
+            log.info("virtual mic %s ready", source)
+            return source
 
     def _apply(self, volume: float) -> None:
         self._volume = max(0.0, min(1.0, volume))
@@ -246,7 +190,5 @@ class VirtualMic:
     def teardown(self) -> None:
         with self._lock:
             self._cancel_ramp_locked()
-            if self._module_id is not None:
-                pipewire.unload_module(self._module_id)
-                self._module_id = None
+            self._apply(0.0)
             self._source = None

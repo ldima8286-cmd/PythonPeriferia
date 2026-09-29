@@ -150,7 +150,7 @@ def cmd_set_default(args: argparse.Namespace) -> int:
 
 
 def cmd_teardown(args: argparse.Namespace) -> int:
-    """Unload loopback and echo-cancel modules left behind by a crash."""
+    """Unload echo-cancel modules left behind by a crash."""
     try:
         items = pipewire.sources()
     except pipewire.PipeWireError as exc:
@@ -299,7 +299,7 @@ def build_parser() -> argparse.ArgumentParser:
         func=cmd_pick_key
     )
     sub.add_parser("sources", help="list PipeWire sources").set_defaults(func=cmd_list_sources)
-    sub.add_parser("teardown", help="unload leftover loopback modules").set_defaults(
+    sub.add_parser("teardown", help="unload leftover echo-cancel modules").set_defaults(
         func=cmd_teardown
     )
     sub.add_parser("init-config", help="write a starter config").set_defaults(func=cmd_init)

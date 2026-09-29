@@ -95,7 +95,7 @@ reads the keyboard, it never grabs it, so your typing keeps working normally.
 | `periferia pick-key` | press a key, get the yaml value for it |
 | `periferia ramp` | manual volume ramp, to check for clicks before PTT works |
 | `periferia set-default` | point the default source at the virtual mic |
-| `periferia teardown` | unload loopback modules left behind by a crash |
+| `periferia teardown` | unload echo-cancel modules left behind by a crash |
 | `periferia config` | show the config actually in effect |
 | `periferia install-service` | install the systemd user unit |
 
@@ -126,9 +126,9 @@ choices. `KEY_Y`, `KEY_U`, `KEY_H`, `KEY_N` and `KEY_GRAVE` are rarely used
 
 ## Why the virtual microphone
 
-The physical mic is never muted. A `module-loopback` virtual source is created
-from it, and applications are pointed at the virtual one. PTT moves only the
-virtual source's volume. Two reasons: the physical device stays available to
+The physical mic is never muted. `module-echo-cancel` is fed from it and
+publishes a separate virtual source under the name applications look for, and
+PTT moves only that virtual source's volume. Two reasons: the physical device stays available to
 anything else, and a smooth ramp can be applied, which is not possible when a
 device is muted outright, because that clicks.
 

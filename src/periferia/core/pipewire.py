@@ -136,8 +136,8 @@ def source_by_module(module_id: int) -> str | None:
 def find_source(description: str) -> str | None:
     """Find a source by the name we asked PipeWire to describe it with.
 
-    module-loopback names its output after the machine, not after us, so the
-    only stable handle is the device.description we passed in.
+    module-echo-cancel names its own output after the machine, so the stable
+    handle is the device.description passed in source_properties.
     """
     if not description:
         return None

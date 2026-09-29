@@ -56,9 +56,10 @@ catches the error and logs it rather than dying.
 
 If PTT muted the physical device, then anything else that wanted the microphone
 at the same time would be muted too, and there would be no way to ramp
-smoothly, because a mute is instant. A `module-loopback` source is created from
-the physical one, applications are pointed at the virtual one, and only the
-virtual volume moves.
+smoothly, because a mute is instant. `module-echo-cancel` is fed from the
+physical device and publishes its own virtual source, renamed through
+`source_properties` to the name applications look for. Applications point at
+that one and only its volume moves.
 
 ## Where the delay comes from
 

@@ -10,6 +10,7 @@ from __future__ import annotations
 import contextlib
 import logging
 import os
+import re
 import select
 import time
 from collections.abc import Callable, Sequence
@@ -130,6 +131,21 @@ def is_keyboard(dev: Any) -> bool:
     return "KEY_ENTER" in names and "KEY_SPACE" in names
 
 
+def physical_device_id(by_id_name: str) -> str:
+    """Strip the interface suffix from a /dev/input/by-id name.
+
+    One physical keyboard normally shows up as several nodes: the HID
+    interface plus the boot protocol one, named `-event-kbd` and
+    `-if02-event-kbd`. Both deliver the same key presses, so watching both
+    means every keystroke arrives twice. Grouping by the part before the
+    suffix keeps one node per real device.
+    """
+    name = re.sub(r"-if\d+-event-kbd$", "", by_id_name)
+    name = re.sub(r"-event-kbd$", "", name)
+    name = re.sub(r"-event-if\d+$", "", name)
+    return name
+
+
 def find_keyboards(preferred: str = "auto") -> list[Path]:
     """Every usable keyboard, not just the first one.
 
@@ -157,18 +173,25 @@ def find_keyboards(preferred: str = "auto") -> list[Path]:
         return []
 
     found: list[Path] = []
-    for target, _name in list_input_devices():
+    seen: set[str] = set()
+    for target, name in list_input_devices():
+        device_id = physical_device_id(name)
+        if device_id in seen:
+            log.debug("skipping %s, same device as an already accepted node", target)
+            continue
         try:
             dev = open_device(target)
         except OSError as exc:
             log.debug("cannot open %s: %s", target, exc)
             continue
         try:
-            if is_keyboard(dev):
-                found.append(target)
+            if not is_keyboard(dev):
+                continue
         finally:
             with contextlib.suppress(OSError):
                 dev.close()
+        seen.add(device_id)
+        found.append(target)
     return found
 
 
@@ -210,6 +233,7 @@ class HotkeyListener:
         self.on_panic = on_panic
         self._devs: dict[Path, Any] = {}
         self._down = False
+        self._panic_down = False
 
     def open(self) -> None:
         for path in self.devices:
@@ -276,9 +300,16 @@ class HotkeyListener:
             return
 
         if self.panic_code is not None and code == self.panic_code and value == PRESS:
-            log.warning("panic")
-            if self.on_panic:
-                self.on_panic()
+            # guarded like PTT: the same physical key can arrive from two
+            # interfaces of one keyboard, and a second panic would be noise
+            if not self._panic_down:
+                self._panic_down = True
+                log.warning("panic")
+                if self.on_panic:
+                    self.on_panic()
+            return
+        if self.panic_code is not None and code == self.panic_code and value == RELEASE:
+            self._panic_down = False
             return
 
         if code != self.ptt_code:

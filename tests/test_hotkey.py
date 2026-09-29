@@ -73,6 +73,7 @@ def test_panic_bypasses_ptt() -> None:
     listener.panic_code = 88
     listener.ignore_repeat = True
     listener._down = True
+    listener._panic_down = False
     listener.on_press = lambda: got.append("press")
     listener.on_release = lambda: got.append("release")
     listener.on_panic = lambda: got.append("panic")
@@ -152,6 +153,7 @@ def _listener(*devs: _FakeDev) -> hotkey.HotkeyListener:
     listener.panic_code = None
     listener.ignore_repeat = True
     listener._down = False
+    listener._panic_down = False
     listener.on_press = None
     listener.on_release = None
     listener.on_panic = None
@@ -182,6 +184,50 @@ def test_poll_dispatches_queued_events() -> None:
     listener.poll(timeout=1.0)
     assert got == ["press", "release"]
     dev.close()
+
+
+def test_duplicate_interfaces_of_one_keyboard_are_deduplicated() -> None:
+    # a physical keyboard shows up as -event-kbd and -if02-event-kbd, and both
+    # deliver the same presses. Watching both would double every event.
+    assert hotkey.physical_device_id("usb-Company_Device-event-kbd") == "usb-Company_Device"
+    assert (
+        hotkey.physical_device_id("usb-Company_Device-if02-event-kbd") == "usb-Company_Device"
+    )
+    # a different physical device must not be folded in
+    assert (
+        hotkey.physical_device_id("usb-ITE_Tech._Inc._ITE_Device_8176_-event-kbd")
+        != hotkey.physical_device_id("usb-Company_Device-event-kbd")
+    )
+
+
+def test_panic_fires_once_per_press() -> None:
+    # the same key can arrive from two interfaces of one keyboard
+    got: list[str] = []
+    listener = _listener(_FakeDev())
+    listener.panic_code = 88
+    listener.on_panic = lambda: got.append("panic")
+
+    listener._handle(hotkey.ecodes.EV_KEY, 88, hotkey.PRESS)
+    listener._handle(hotkey.ecodes.EV_KEY, 88, hotkey.PRESS)
+    assert got == ["panic"]
+
+    listener._handle(hotkey.ecodes.EV_KEY, 88, hotkey.RELEASE)
+    listener._handle(hotkey.ecodes.EV_KEY, 88, hotkey.PRESS)
+    assert got == ["panic", "panic"]
+
+
+def test_duplicate_press_does_not_reopen_the_mic() -> None:
+    # one physical press, two interfaces, one mic opening
+    got: list[str] = []
+    listener = _listener(_FakeDev())
+    listener.on_press = lambda: got.append("press")
+    listener.on_release = lambda: got.append("release")
+
+    listener._handle(hotkey.ecodes.EV_KEY, 30, hotkey.PRESS)
+    listener._handle(hotkey.ecodes.EV_KEY, 30, hotkey.PRESS)
+    listener._handle(hotkey.ecodes.EV_KEY, 30, hotkey.RELEASE)
+    listener._handle(hotkey.ecodes.EV_KEY, 30, hotkey.RELEASE)
+    assert got == ["press", "release"]
 
 
 def test_open_does_not_grab_the_keyboard(monkeypatch: pytest.MonkeyPatch) -> None:

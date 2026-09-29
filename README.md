@@ -130,6 +130,12 @@ releasing it on the external one still closes the microphone, instead of
 leaving it stuck open. Unplugging a keyboard mid-hold drops that device and
 keeps working on the rest.
 
+One physical keyboard usually appears as several nodes, for example
+`usb-Vendor_Keyboard-event-kbd` and `usb-Vendor_Keyboard-if02-event-kbd`. Both
+report the same presses, so those are collapsed into one device. Otherwise a
+single keypress would arrive twice. `periferia devices` shows the raw list if
+you want to see what was found.
+
 To restrict it, set `ptt.device` to one node or to several, comma separated:
 
 ```yaml

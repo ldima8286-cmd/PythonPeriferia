@@ -7,14 +7,18 @@ prints "M" on a Russian layout and "V" on an English one.
 
 from __future__ import annotations
 
+import contextlib
 import logging
+import select
+from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
 try:
     from evdev import InputDevice, ecodes
 except ImportError:  # pragma: no cover
-    InputDevice = None  # type: ignore[assignment]
-    ecodes = None  # type: ignore[assignment]
+    InputDevice = None  # type: ignore[assignment,misc]
+    ecodes = None  # type: ignore[assignment,misc]
 
 log = logging.getLogger(__name__)
 
@@ -55,13 +59,15 @@ def resolve_key(name: str) -> int | None:
     if not name.startswith("KEY_") and not name.startswith("BTN_"):
         name = f"KEY_{name}"
 
-    return ecodes.ecode.get(name)
+    return ecodes.ecodes.get(name)
 
 
 def key_label(code: int) -> str:
     if ecodes is None:
         return str(code)
     name = ecodes.KEY[code]
+    if isinstance(name, tuple):
+        name = name[0]
     letter = RU_LETTERS.get(name)
     if letter:
         return f"{letter} ({name.removeprefix('KEY_')})"
@@ -88,6 +94,17 @@ def list_input_devices() -> list[tuple[Path, str]]:
     return found
 
 
+def open_device(path: Path | str) -> Any:
+    """Open an input device for reading.
+
+    evdev has no logind/libseat support in any released version, so there is no
+    way to borrow the desktop's access: the process itself needs permission on
+    the node. `readonly=True` avoids the O_RDWR attempt, which can poke device
+    firmware state for no benefit when we only read key events.
+    """
+    return InputDevice(str(path), readonly=True)
+
+
 def pick_device(preferred: str = "auto") -> Path | None:
     if preferred != "auto":
         path = Path(preferred)
@@ -99,7 +116,7 @@ def pick_device(preferred: str = "auto") -> Path | None:
         return None
     for target, _name in list_input_devices():
         try:
-            dev = InputDevice(str(target))
+            dev = open_device(target)
         except OSError as exc:
             log.debug("cannot open %s: %s", target, exc)
             continue
@@ -121,9 +138,9 @@ class HotkeyListener:
         *,
         panic_code: int | None = None,
         ignore_repeat: bool = True,
-        on_press=None,
-        on_release=None,
-        on_panic=None,
+        on_press: Callable[[], None] | None = None,
+        on_release: Callable[[], None] | None = None,
+        on_panic: Callable[[], None] | None = None,
     ) -> None:
         if InputDevice is None:
             raise RuntimeError("evdev is not installed")
@@ -138,29 +155,27 @@ class HotkeyListener:
         self._down = False
 
     def open(self) -> None:
-        self._dev = InputDevice(str(self.device))
-        self._dev.grab()
-        log.info("listening on %s (grabbed)", self.device)
+        self._dev = open_device(self.device)
+        log.info("listening on %s", self.device)
 
     def close(self) -> None:
         if self._dev is not None:
-            try:
-                self._dev.ungrab()
+            with contextlib.suppress(OSError):
                 self._dev.close()
-            except OSError:
-                pass
             self._dev = None
 
     def poll(self, timeout: float = 0.2) -> None:
         if self._dev is None:
             raise RuntimeError("listener is not open")
-        events = self._dev.read_loop()
         try:
-            for _dev, event, _data in events:
-                self._handle(event.type, event.code, event.value)
-        except OSError as exc:
+            readable, _, _ = select.select([self._dev.fd], [], [], timeout)
+        except (OSError, ValueError) as exc:
             log.error("input device disappeared: %s", exc)
             raise
+        if not readable:
+            return
+        for event in self._dev.read():
+            self._handle(event.type, event.code, event.value)
 
     def _handle(self, ev_type: int, code: int, value: int) -> None:
         if ev_type != ecodes.EV_KEY:

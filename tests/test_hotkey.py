@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+import os
+import time
+from pathlib import Path
+
 import pytest
 
-from periferia.modules import hotkey
 from periferia.modules import audio as audio_mod
+from periferia.modules import hotkey
 
 pytest.importorskip("evdev", reason="evdev needs access to /dev/input")
 
@@ -99,3 +103,95 @@ def test_ramp_curve_is_monotonic() -> None:
         assert values == sorted(values), curve
         assert values[0] == pytest.approx(0.0)
         assert values[-1] == pytest.approx(1.0)
+
+
+class _FakeEvent:
+    def __init__(self, type_: int, code: int, value: int) -> None:
+        self.type = type_
+        self.code = code
+        self.value = value
+
+
+class _FakeDev:
+    """Stands in for evdev.InputDevice, backed by a real pipe."""
+
+    def __init__(self) -> None:
+        self.read_fd, self.write_fd = os.pipe()
+        self.queued: list[_FakeEvent] = []
+        self.calls: list[str] = []
+        self.closed = False
+
+    @property
+    def fd(self) -> int:
+        return self.read_fd
+
+    def read(self) -> list[_FakeEvent]:
+        if self.queued:
+            return self.queued
+        os.read(self.read_fd, 1)
+        return []
+
+    def grab(self) -> None:
+        self.calls.append("grab")
+
+    def ungrab(self) -> None:
+        self.calls.append("ungrab")
+
+    def close(self) -> None:
+        self.calls.append("close")
+        self.closed = True
+        os.close(self.read_fd)
+        os.close(self.write_fd)
+
+
+def _listener(dev: _FakeDev) -> hotkey.HotkeyListener:
+    listener = hotkey.HotkeyListener.__new__(hotkey.HotkeyListener)
+    listener._dev = dev
+    listener.ptt_code = 30
+    listener.panic_code = None
+    listener.ignore_repeat = True
+    listener._down = False
+    listener.on_press = None
+    listener.on_release = None
+    listener.on_panic = None
+    return listener
+
+
+def test_poll_returns_on_timeout_without_events() -> None:
+    # this is what lets the daemon expire hold_ms while the user types nothing
+    dev = _FakeDev()
+    started = time.monotonic()
+    _listener(dev).poll(timeout=0.05)
+    assert time.monotonic() - started < 1.0
+    dev.close()
+
+
+def test_poll_dispatches_queued_events() -> None:
+    dev = _FakeDev()
+    got: list[str] = []
+    listener = _listener(dev)
+    listener.on_press = lambda: got.append("press")
+    listener.on_release = lambda: got.append("release")
+
+    dev.queued = [
+        _FakeEvent(hotkey.ecodes.EV_KEY, 30, hotkey.PRESS),
+        _FakeEvent(hotkey.ecodes.EV_KEY, 30, hotkey.RELEASE),
+    ]
+    os.write(dev.write_fd, b"x")
+    listener.poll(timeout=1.0)
+    assert got == ["press", "release"]
+    dev.close()
+
+
+def test_open_does_not_grab_the_keyboard(monkeypatch: pytest.MonkeyPatch) -> None:
+    # grabbing would swallow every keystroke system wide
+    dev = _FakeDev()
+    monkeypatch.setattr(hotkey, "open_device", lambda path: dev)
+
+    listener = hotkey.HotkeyListener(Path("/dev/input/event5"), 30)
+    listener.open()
+
+    assert "grab" not in dev.calls
+    listener.close()
+    assert "ungrab" not in dev.calls
+    assert "close" in dev.calls

@@ -1,0 +1,75 @@
+# Periferia configuration.
+# Copy to ~/.config/periferia/config.yaml and edit.
+# Show what is actually in effect with:  periferia config
+
+audio:
+  # Physical capture device. "auto" picks the first real (non virtual) source.
+  # Run "periferia sources" to see the names.
+  physical_source: auto
+
+  # Name of the virtual source created from it. Applications should point here.
+  virtual_name: PeriferiaMic
+
+  # Attack and release in milliseconds. Attack must be short or the mic feels
+  # late; release short enough not to cut the tail of a word.
+  attack_ms: 10
+  release_ms: 60
+
+  # How long the mic stays open after the key is released, so the last word is
+  # not clipped. Set 0 for a hard cut.
+  hold_ms: 200
+
+  # exp (default, fastest perceived onset), linear, s_curve
+  curve: exp
+
+  # Volume the mic opens to.
+  target_volume: 1.0
+
+  # Start with the mic closed. Keep this true.
+  start_muted: true
+
+  enabled: true
+
+ptt:
+  # Physical key to hold. "KEY_V" is the physical V key, which is "M" on a
+  # Russian layout. Get the right value with:  periferia pick-key
+  # Note: WASD is movement in most games, so avoid KEY_W KEY_A KEY_S KEY_D.
+  ptt_key: auto
+
+  # Instant mute, ignoring hold_ms. Set to "" to disable.
+  panic_key: KEY_F12
+
+  # /dev/input/eventN, or "auto" to find a keyboard.
+  device: auto
+
+  # Ignore key auto-repeat. Keep true, otherwise the key sticks when held.
+  ignore_repeat: true
+
+  release_on_focus_loss: true
+
+  enabled: true
+
+processing:
+  # These are PipeWire module-echo-cancel properties, not code in this project.
+  noise_suppression: true
+  echo_cancellation: true
+  voice_detect: false
+  tail_length_ms: 200
+
+  # Anything else the module accepts.
+  extra_props: {}
+
+  enabled: true
+
+tray:
+  show: true
+  overlay: false
+  overlay_corner: top-right
+
+  enabled: true
+
+log:
+  level: info
+  file: null
+
+  enabled: true

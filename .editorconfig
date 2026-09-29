@@ -1,0 +1,10 @@
+target-version = py311
+line-length = 100
+
+[files]
+include = ["*.py", "*.toml", "*.yaml", "*.md", "*.service", "*.rules"]
+extend-exclude = [".venv", "build", "dist", ".mypy_cache", ".ruff_cache"]
+
+[format]
+quote-style = "double"
+indent-style = "space"

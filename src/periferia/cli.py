@@ -1,0 +1,303 @@
+"""Command line entry point."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import shutil
+import sys
+from pathlib import Path
+
+from .core import config as config_mod
+from .core import envcheck, pipewire
+from .modules import audio as audio_mod
+from .modules import hotkey
+
+RESET = "\033[0m"
+DIM = "\033[2m"
+BOLD = "\033[1m"
+GREEN = "\033[32m"
+YELLOW = "\033[33m"
+CYAN = "\033[36m"
+
+
+def _supports_color() -> bool:
+    return sys.stdout.isatty()
+
+
+def _c(text: str, code: str) -> str:
+    return f"{code}{text}{RESET}" if _supports_color() else text
+
+
+def cmd_check(args: argparse.Namespace) -> int:
+    return envcheck.main()
+
+
+def cmd_devices(args: argparse.Namespace) -> int:
+    devices = hotkey.list_input_devices()
+    if not devices:
+        print("no keyboard devices found in /dev/input/by-id")
+        return 1
+    for path, name in devices:
+        marker = "  " if _readable(path) else "! "
+        print(f"{marker}{name}\n     {path}")
+    return 0
+
+
+def _readable(path: Path) -> bool:
+    import os
+
+    return os.access(str(path), os.R_OK | os.W_OK)
+
+
+def cmd_pick_key(args: argparse.Namespace) -> int:
+    """Listen for one keypress and print the config value for it."""
+    if hotkey.ecodes is None:
+        print("evdev is not installed: pip install evdev", file=sys.stderr)
+        return 1
+
+    device = hotkey.pick_device("auto")
+    if device is None:
+        print("no keyboard device found", file=sys.stderr)
+        return 1
+
+    print(f"listening on {device}")
+    print(f"press any key, {hotkey.RELEASE and 'Esc' or 'Esc'} quits\n")
+
+    try:
+        dev = hotkey.InputDevice(str(device))
+    except OSError as exc:
+        print(f"cannot open {device}: {exc}", file=sys.stderr)
+        print("this usually means missing permissions, see docs/udev.md", file=sys.stderr)
+        return 1
+
+    from evdev import categorize  # local import keeps the top level optional
+
+    try:
+        dev.grab()
+        for _dev, event in dev.read_loop():
+            if event.type != hotkey.ecodes.EV_KEY or event.value != hotkey.PRESS:
+                continue
+            name = hotkey.ecodes.KEY.get(event.code, str(event.code))
+            if name == "KEY_ESC":
+                print("cancelled")
+                return 130
+            label = hotkey.key_label(event.code)
+            print(f"\n  key   {name}")
+            print(f"  label {label}")
+            print(f"\nyaml:   ptt_key: \"{name}\"")
+            return 0
+    except KeyboardInterrupt:
+        print("\ncancelled")
+        return 130
+    finally:
+        try:
+            dev.ungrab()
+            dev.close()
+        except OSError:
+            pass
+        del categorize
+    return 1
+
+
+def cmd_list_sources(args: argparse.Namespace) -> int:
+    try:
+        items = pipewire.sources()
+    except pipewire.PipeWireError as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+    if not items:
+        print("no sources")
+        return 1
+
+    for item in items:
+        name = item.get("name") or "?"
+        tag = "virtual" if pipewire.is_virtual(name) else "physical"
+        muted = "muted" if item.get("mute") else ""
+        print(f"[{tag:7}] {name}  {muted}")
+
+    default = pipewire.default_source()
+    print(f"\ndefault source: {default or 'unknown'}")
+    print(f"physical mic  : {audio_mod.pick_physical_source('auto') or 'none found'}")
+    return 0
+
+
+def cmd_set_default(args: argparse.Namespace) -> int:
+    cfg = config_mod.load(args.config)
+    name = args.name
+    if not name:
+        name = cfg.audio.virtual_name
+        if not pipewire.source_exists(name):
+            name = audio_mod.pick_physical_source(cfg.audio.physical_source) or ""
+    if not name:
+        print("cannot determine a source to use", file=sys.stderr)
+        return 1
+    if not pipewire.source_exists(name):
+        print(f"{name} does not exist. Run 'periferia sources'", file=sys.stderr)
+        return 1
+    try:
+        pipewire.set_default_source(name)
+    except pipewire.PipeWireError as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+    print(f"default source set to {name}")
+    return 0
+
+
+def cmd_teardown(args: argparse.Namespace) -> int:
+    """Unload loopback and echo-cancel modules left behind by a crash."""
+    try:
+        items = pipewire.sources()
+    except pipewire.PipeWireError as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+
+    seen: dict[int, str] = {}
+    for item in items:
+        module_id = item.get("owner_module")
+        if module_id and module_id != pipewire.NO_MODULE:
+            seen[module_id] = item.get("name") or "?"
+
+    count = 0
+    for module_id, name in sorted(seen.items()):
+        if pipewire.unload_module(module_id):
+            count += 1
+            print(f"unloaded module {module_id} ({name})")
+    print(f"{count} modules unloaded")
+    return 0
+
+
+def cmd_ramp(args: argparse.Namespace) -> int:
+    """Manual volume ramp, to check for clicks and latency before PTT exists."""
+    import time
+
+    cfg = config_mod.load(args.config)
+    line = args.name or audio_mod.pick_physical_source(cfg.audio.physical_source) or ""
+    if not pipewire.source_exists(line):
+        print(f"no usable source (got {line!r})", file=sys.stderr)
+        return 1
+
+    mic = audio_mod.VirtualMic(cfg.audio)
+    mic._source = line  # manual test path, bypasses setup
+
+    target = float(args.volume)
+    duration = int(args.ms)
+    print(f"ramping {line} -> {target} over {duration} ms")
+    try:
+        mic.ramp(target, duration)
+        deadline = time.monotonic() + duration / 1000.0 + 1.0
+        while time.monotonic() < deadline:
+            time.sleep(0.02)
+            thread = mic._ramp_thread
+            if thread is None or not thread.is_alive():
+                break
+        print(f"done, volume is {mic.volume:.2f}")
+    finally:
+        try:
+            pipewire.set_volume(line, 0.0)
+        except pipewire.PipeWireError:
+            pass
+    return 0
+
+
+def cmd_config(args: argparse.Namespace) -> int:
+    if args.json:
+        print(json.dumps(config_mod.load(args.config).to_dict(), indent=2, ensure_ascii=False))
+        return 0
+    path = config_mod.find_config(args.config)
+    print(f"config: {path or 'defaults (no file found)'}")
+    for section, values in config_mod.load(args.config).to_dict().items():
+        print(f"\n[{section}]")
+        for key, value in values.items():
+            print(f"  {key} = {value!r}")
+    return 0
+
+def cmd_init(args: argparse.Namespace) -> int:
+    target = config_mod.default_config_path()
+    if target.exists() and not args.force:
+        print(f"{target} already exists, use --force to overwrite")
+        return 1
+    template = Path(__file__).resolve().parent.parent.parent / "config.example.yaml"
+    if template.is_file():
+        target.write_text(template.read_text(encoding="utf-8"), encoding="utf-8")
+    print(f"wrote {target}")
+    print("next: periferia check")
+    return 0
+
+
+def cmd_install_service(args: argparse.Namespace) -> int:
+    unit = Path(__file__).resolve().parent.parent.parent / "systemd" / "periferia.service"
+    if not unit.is_file():
+        print(f"{unit} not found", file=sys.stderr)
+        return 1
+    dest_dir = Path.home() / ".config" / "systemd" / "user"
+    if not shutil.which("systemctl"):
+        print("systemctl not found, copy the unit manually", file=sys.stderr)
+        return 1
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    dest = dest_dir / unit.name
+    dest.write_text(unit.read_text(encoding="utf-8"), encoding="utf-8")
+    print(f"wrote {dest}")
+    print("run: systemctl --user daemon-reload && systemctl --user enable --now periferia")
+    return 0
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="periferia",
+        description="Global push-to-talk and microphone control for Linux",
+    )
+    parser.add_argument("-c", "--config", help="path to config.yaml")
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    sub.add_parser("check", help="verify this machine can run periferia").set_defaults(
+        func=cmd_check
+    )
+    sub.add_parser("devices", help="list input devices that look like keyboards").set_defaults(
+        func=cmd_devices
+    )
+    sub.add_parser("pick-key", help="press a key, get the config value for it").set_defaults(
+        func=cmd_pick_key
+    )
+    sub.add_parser("sources", help="list PipeWire sources").set_defaults(func=cmd_list_sources)
+    sub.add_parser("teardown", help="unload leftover loopback modules").set_defaults(
+        func=cmd_teardown
+    )
+    sub.add_parser("init-config", help="write a starter config").set_defaults(func=cmd_init)
+
+    p = sub.add_parser("set-default", help="point the default source at a device")
+    p.add_argument("name", nargs="?", help="source name, default is the physical mic")
+    p.set_defaults(func=cmd_set_default)
+
+    p = sub.add_parser("ramp", help="manual volume ramp, to test for clicks")
+    p.add_argument("name", nargs="?", help="source name")
+    p.add_argument("-v", "--volume", default="0.5", help="target volume 0..1")
+    p.add_argument("-m", "--ms", default="200", help="duration in ms")
+    p.set_defaults(func=cmd_ramp)
+
+    p = sub.add_parser("config", help="show the effective config")
+    p.add_argument("--json", action="store_true")
+    p.set_defaults(func=cmd_config)
+
+    p = sub.add_parser("install-service", help="install the systemd user unit")
+    p.add_argument("--force", action="store_true")
+    p.set_defaults(func=cmd_install_service)
+
+    return parser
+
+
+def main() -> int:
+    parser = build_parser()
+    args = parser.parse_args()
+    try:
+        return int(args.func(args))
+    except KeyboardInterrupt:
+        return 130
+    except Exception as exc:  # noqa: BLE001
+        if args.command not in ("check", "pick-key"):
+            print(f"{_c('error', BOLD + YELLOW)}: {exc}", file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -1,0 +1,25 @@
+[Unit]
+Description=Periferia: global push-to-talk and microphone control
+Documentation=https://github.com/ldima8286-cmd/PythonPeriferia
+After=pipewire.service pipewire-pulse.service
+Wants=pipewire.service
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/periferia-daemon
+Restart=on-failure
+RestartSec=2
+
+# The daemon only needs to read key events and talk to PipeWire.
+# It never needs to write to a device for PTT to work.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=%h/.config/periferia %h/.cache
+RestrictNamespaces=true
+RestrictRealtime=true
+MemoryDenyWriteExecute=true
+
+[Install]
+WantedBy=default.target

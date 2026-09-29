@@ -1,0 +1,24 @@
+# Periferia: read access to input devices.
+#
+# Check first whether you already have access. logind normally grants the
+# logged-in user ACLs on the devices of their own session, and if
+# "periferia check" says the devices are readable, this file is NOT needed.
+#
+# Install (adjust the vendor/product ids from your own device):
+#   sudo cp udev/10-periferia.rules /etc/udev/rules.d/
+#   sudo udevadm control --reload-rules
+#   sudo udevadm trigger
+#
+# Then log out and back in.
+#
+# Find your ids with:
+#   udevadm info -a -n /dev/input/event5 | grep -E 'id=|PRODUCT='
+
+ACTION=="add|change", KERNEL=="event*", SUBSYSTEM=="input", \
+  ATTRS{idVendor}=="258a", ATTRS{idProduct}=="1007", \
+  TAG+="uaccess", MODE="0660"
+
+# Same, for the built-in laptop keyboard if it needs it.
+ACTION=="add|change", KERNEL=="event*", SUBSYSTEM=="input", \
+  ATTRS{idVendor}=="0fe2", ATTRS{idProduct}=="8176", \
+  TAG+="uaccess", MODE="0660"

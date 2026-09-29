@@ -1,0 +1,61 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "periferia"
+version = "0.1.0"
+description = "Global push-to-talk on any key, virtual microphone and mic processing for Linux"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+keywords = ["linux", "pipewire", "microphone", "push-to-talk", "evdev", "wayland"]
+classifiers = [
+    "Environment :: X11 Applications",
+    "Intended Audience :: End Users/Desktop",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Multimedia :: Sound/Audio :: Capture/Recording",
+]
+
+dependencies = [
+    "PyYAML>=6.0",
+    "evdev>=1.6.1",
+]
+
+[project.optional-dependencies]
+gui = ["PySide6>=6.6"]
+xkb = ["pyxkbcommon>=1.5"]
+dev = ["pytest>=8.0", "ruff>=0.6", "mypy>=1.11"]
+
+[project.scripts]
+periferia = "periferia.cli:main"
+periferia-daemon = "periferia.core.daemon:main"
+periferia-check = "periferia.core.envcheck:main"
+
+[project.urls]
+Repository = "https://github.com/ldima8286-cmd/PythonPeriferia"
+Issues = "https://github.com/ldima8286-cmd/PythonPeriferia/issues"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/periferia"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "ASYNC", "RUF"]
+
+[tool.mypy]
+python_version = "3.11"
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = true
+files = ["src/periferia"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

@@ -252,20 +252,43 @@ def test_panic_check_measures_the_drop_after_a_panic_event(monkeypatch) -> None:
     monkeypatch.setattr("src.periferia.tui.time.monotonic", lambda: clock[0])
     check.armed_at = 99.9
     app.daemon.log.append((99.95, "panic"))  # at or after armed_at
+    app.daemon.log.append((99.97, "panic-closed"))
     check.update(app, 0.2)
     assert check.phase == "checking"
     assert check.saw_panic
 
-    clock[0] = 100.02
+    clock[0] = 100.9  # a slow frame, long after the mic already closed
     app.volume = 0.0
     check.update(app, 0.3)
     assert check.finished
     assert check.closed
-    assert check.drop_ms is not None and check.drop_ms < 120
+    # 20 ms of real work, not the 950 ms since the hold started
+    assert check.drop_ms is not None and abs(check.drop_ms - 20.0) < 0.001
 
     lines = "\n".join(check.render(app, 80))
     assert "panic closed the microphone" in lines
-    assert "hold_ms is 200" in lines
+    assert "took 20 ms" in lines
+
+
+def test_panic_does_not_blame_the_reaction_time(monkeypatch) -> None:
+    # The user needs a moment to reach the panic key. That time is theirs, not
+    # the audio path's, and it must not show up as a slow panic.
+    app = _FakeApp(volume=0.0)
+    check = CheckPanic()
+    _arm_panic(app, check)
+
+    clock = [100.0]
+    monkeypatch.setattr("src.periferia.tui.time.monotonic", lambda: clock[0])
+    check.armed_at = 100.0
+    clock[0] = 101.2  # over a second of hesitation before pressing panic
+    app.daemon.log.append((101.2, "panic"))
+    app.daemon.log.append((101.21, "panic-closed"))
+    check.update(app, 0.2)
+    app.volume = 0.0
+    check.update(app, 0.3)
+
+    assert check.finished and check.closed
+    assert check.drop_ms is not None and check.drop_ms < check.panic_budget(app)
 
 
 def test_panic_check_fails_when_the_mic_closes_without_a_panic(monkeypatch) -> None:

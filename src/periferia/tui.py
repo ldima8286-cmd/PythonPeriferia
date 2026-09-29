@@ -436,6 +436,7 @@ class CheckPanic(Check):
         super().reset()
         self.phase = "need_open"
         self.armed_at = 0.0
+        self.panic_at = 0.0
         self.drop_ms: float | None = None
         self.closed = False
         self.saw_panic = False
@@ -457,19 +458,32 @@ class CheckPanic(Check):
                 self.armed_at = time.monotonic()
             return
         if self.phase == "armed":
-            if app.daemon is not None and app.daemon.events("panic", self.armed_at):
-                self.saw_panic = True
-                self.phase = "checking"
-            elif not open_now and self.patience_left(app) <= 0.0:
+            if app.daemon is not None:
+                # Measure between the two stamps the daemon takes around
+                # mic.panic(). Timing this against the polled level bar would
+                # fold in the sample interval and blame it on the audio path.
+                panics = app.daemon.events("panic", self.armed_at)
+                if panics:
+                    self.saw_panic = True
+                    self.panic_at = panics[0]
+                    self.phase = "checking"
+                    return
+            if not open_now and self.patience_left(app) <= 0.0:
                 # the gate closed with no panic behind it: that is a release
                 self.phase = "done"
                 self.finished = True
             return
-        if self.phase == "checking" and fraction is not None and fraction < 0.02:
-            self.closed = True
-            self.drop_ms = (time.monotonic() - self.armed_at) * 1000.0
-            self.phase = "done"
-            self.finished = True
+        if self.phase == "checking":
+            closed = app.daemon.events("panic-closed", self.panic_at) if app.daemon else []
+            level_down = fraction is not None and fraction < 0.02
+            if closed or level_down:
+                if closed:
+                    self.drop_ms = (closed[0] - self.panic_at) * 1000.0
+                else:
+                    self.drop_ms = (time.monotonic() - self.panic_at) * 1000.0
+                self.closed = True
+                self.phase = "done"
+                self.finished = True
 
     def patience_left(self, app: App) -> float:
         """How long to keep waiting before calling an uneventful hold a miss."""
@@ -504,15 +518,26 @@ class CheckPanic(Check):
         return [
             verdict_line(self.closed, "panic closed the microphone", "volume is 0%"),
             verdict_line(
-                self.closed and self.drop_ms is not None and self.drop_ms < 120,
+                self.closed and self.drop_ms is not None and self.drop_ms < self.panic_budget(app),
                 "closed without waiting for hold_ms",
-                f"took {self.drop_ms:.0f} ms, hold_ms is {app.cfg.audio.hold_ms}"
+                f"took {self.drop_ms:.0f} ms, budget is {self.panic_budget(app):.0f} ms"
                 if self.drop_ms is not None
                 else "microphone is still open",
             ),
             "",
             "Esc returns to the menu.",
         ]
+
+    def panic_budget(self, app: App) -> float:
+        """How long a panic may take and still count as immediate.
+
+        The only honest comparison is against hold_ms: a normal release waits
+        that long, so a panic has to land well inside it or the two are the
+        same thing to the user. The floor covers the pactl calls panic makes
+        on its way to zero, which the previous 120 ms threshold sat below, so
+        a perfectly correct panic could not pass it.
+        """
+        return max(300.0, app.cfg.audio.hold_ms / 2.0)
 
 
 class CheckLock(Check):

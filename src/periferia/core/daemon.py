@@ -160,6 +160,10 @@ class Daemon:
         self._record("panic")
         self._release_at = None
         self.mic.panic()
+        # Stamp the real end of the panic, not a level the TUI polls later.
+        # A polled bar cannot resolve this below its own refresh interval,
+        # which is coarse enough to hide a correct panic behind a slow sample.
+        self._record("panic-closed")
 
     def on_session_locked(self) -> None:
         """Close the microphone without waiting for a key that may not come."""

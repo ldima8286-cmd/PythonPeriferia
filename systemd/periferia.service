@@ -12,14 +12,21 @@ RestartSec=2
 
 # The daemon only needs to read key events and talk to PipeWire.
 # It never needs to write to a device for PTT to work.
+#
+# PrivateTmp, RestrictNamespaces and MemoryDenyWriteExecute are deliberately
+# absent: each of them needs a namespace or a memory mapping the hardened
+# setup does not allow here, and the service died with exit 226/NAMESPACE
+# before it reached PipeWire. NoNewPrivileges alone is enough here, since the
+# daemon only ever reads /dev/input and talks to PipeWire.
 NoNewPrivileges=true
-PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=read-only
-ReadWritePaths=%h/.config/periferia %h/.cache
-RestrictNamespaces=true
-RestrictRealtime=true
-MemoryDenyWriteExecute=true
+
+# The leading "-" tells systemd to ignore these when they do not exist.
+# Without it the whole unit fails to start with 226/NAMESPACE, because
+# ReadWritePaths is a hard requirement of the mount namespace setup and
+# ~/.config/periferia only appears once something writes the config.
+ReadWritePaths=-%h/.config/periferia -%h/.cache
 
 [Install]
 WantedBy=default.target

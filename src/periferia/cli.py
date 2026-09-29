@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
+import re
 import shutil
 import sys
 from pathlib import Path
@@ -62,16 +64,15 @@ def cmd_pick_key(args: argparse.Namespace) -> int:
         return 1
 
     print(f"listening on {device}")
-    print(f"press any key, {hotkey.RELEASE and 'Esc' or 'Esc'} quits\n")
+    print("the keyboard is grabbed while this runs, so nothing reaches other apps")
+    print("press the key you want for PTT, Esc cancels\n")
 
     try:
-        dev = hotkey.InputDevice(str(device))
+        dev = hotkey.open_device(device)
     except OSError as exc:
         print(f"cannot open {device}: {exc}", file=sys.stderr)
         print("this usually means missing permissions, see docs/udev.md", file=sys.stderr)
         return 1
-
-    from evdev import categorize  # local import keeps the top level optional
 
     try:
         dev.grab()
@@ -96,7 +97,6 @@ def cmd_pick_key(args: argparse.Namespace) -> int:
             dev.close()
         except OSError:
             pass
-        del categorize
     return 1
 
 
@@ -126,12 +126,17 @@ def cmd_set_default(args: argparse.Namespace) -> int:
     cfg = config_mod.load(args.config)
     name = args.name
     if not name:
-        name = cfg.audio.virtual_name
-        if not pipewire.source_exists(name):
-            name = audio_mod.pick_physical_source(cfg.audio.physical_source) or ""
-    if not name:
-        print("cannot determine a source to use", file=sys.stderr)
-        return 1
+        # The virtual source is created with our description but gets a
+        # machine-generated name, so resolve it through that description.
+        name = pipewire.find_source(cfg.audio.virtual_name) or ""
+        if not name:
+            print(
+                f"no source described as {cfg.audio.virtual_name!r}, "
+                "is the daemon running?",
+                file=sys.stderr,
+            )
+            print("start it with 'periferia-daemon', or pass a name explicitly", file=sys.stderr)
+            return 1
     if not pipewire.source_exists(name):
         print(f"{name} does not exist. Run 'periferia sources'", file=sys.stderr)
         return 1
@@ -193,10 +198,8 @@ def cmd_ramp(args: argparse.Namespace) -> int:
                 break
         print(f"done, volume is {mic.volume:.2f}")
     finally:
-        try:
+        with contextlib.suppress(pipewire.PipeWireError):
             pipewire.set_volume(line, 0.0)
-        except pipewire.PipeWireError:
-            pass
     return 0
 
 
@@ -225,18 +228,54 @@ def cmd_init(args: argparse.Namespace) -> int:
     return 0
 
 
+def _daemon_script() -> Path | None:
+    """Locate the installed console script.
+
+    The unit shipped in the repo cannot hardcode a path: a venv puts it next to
+    the interpreter, a user install puts it in ~/.local/bin, and a distro
+    package puts it in /usr/bin.
+    """
+    candidates = [Path(sys.executable).parent / "periferia-daemon"]
+    on_path = shutil.which("periferia-daemon")
+    if on_path:
+        candidates.append(Path(on_path))
+    for candidate in candidates:
+        if candidate.is_file():
+            return candidate
+    return None
+
+
 def cmd_install_service(args: argparse.Namespace) -> int:
     unit = Path(__file__).resolve().parent.parent.parent / "systemd" / "periferia.service"
     if not unit.is_file():
         print(f"{unit} not found", file=sys.stderr)
+        return 1
+    daemon = _daemon_script()
+    if daemon is None:
+        print(
+            "could not find the installed 'periferia-daemon' script; "
+            "install the package or add its bin directory to PATH",
+            file=sys.stderr,
+        )
         return 1
     dest_dir = Path.home() / ".config" / "systemd" / "user"
     if not shutil.which("systemctl"):
         print("systemctl not found, copy the unit manually", file=sys.stderr)
         return 1
     dest_dir.mkdir(parents=True, exist_ok=True)
+
+    # The unit makes this writable for the daemon, and systemd refuses to build
+    # the mount namespace for a ReadWritePaths entry that does not exist yet.
+    (Path.home() / ".config" / "periferia").mkdir(parents=True, exist_ok=True)
+
     dest = dest_dir / unit.name
-    dest.write_text(unit.read_text(encoding="utf-8"), encoding="utf-8")
+    text = re.sub(
+        r"^ExecStart=.*$",
+        f"ExecStart={daemon}",
+        unit.read_text(encoding="utf-8"),
+        flags=re.MULTILINE,
+    )
+    dest.write_text(text, encoding="utf-8")
     print(f"wrote {dest}")
     print("run: systemctl --user daemon-reload && systemctl --user enable --now periferia")
     return 0
@@ -293,7 +332,7 @@ def main() -> int:
         return int(args.func(args))
     except KeyboardInterrupt:
         return 130
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         if args.command not in ("check", "pick-key"):
             print(f"{_c('error', BOLD + YELLOW)}: {exc}", file=sys.stderr)
         return 1

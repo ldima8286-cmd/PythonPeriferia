@@ -146,6 +146,10 @@ class Daemon:
         self.mic.open_mic()
 
     def on_release(self) -> None:
+        # logging this too: with only the press side visible, a listener that
+        # never saw anything was indistinguishable from a key that was never
+        # pressed, and that cost a long hunt
+        log.info("ptt up -> mic closes after %d ms", max(0, self.cfg.audio.hold_ms))
         self._record("release")
         self._pressed_at = None
         hold = max(0, self.cfg.audio.hold_ms) / 1000.0

@@ -111,10 +111,15 @@ class VirtualMic:
 
     def _apply(self, volume: float) -> None:
         self._volume = max(0.0, min(1.0, volume))
+        if not self._source:
+            return
         try:
-            self._slider(self._source or "", self._volume)
+            self._slider(self._source, self._volume)
         except pipewire.PipeWireError as exc:
-            log.warning("volume update failed: %s", exc)
+            # Once the module is gone the source is gone with it, and saying so
+            # loudly while shutting down only hides failures that matter.
+            level = log.warning if self._held else log.debug
+            level("volume update failed: %s", exc)
 
     def ramp(self, target: float, duration_ms: int) -> None:
         """Move to target over duration_ms, cancelling any ramp in flight."""

@@ -143,35 +143,57 @@ EOF
 )
 
 if [ "$install" -eq 1 ]; then
-    dest=/etc/udev/rules.d/10-periferia.rules
-    if command -v rpm-ostree >/dev/null 2>&1; then
-        # /etc is owned by the image on an ostree system, so the override has
-        # to be created first or the copy below has nowhere to land.
-        say "creating rpm-ostree override for $dest"
-        sudo rpm-ostree override create --admin "$dest" || {
-            echo "error: could not create the override" >&2
+    dest=${PERIFERIA_RULES_DEST:-/etc/udev/rules.d/10-periferia.rules}
+    # On a current rpm-ostree deployment /etc is writable by the admin, and
+    # "rpm-ostree override create" no longer exists at all (it was replaced by
+    # override remove/replace/reset). So write the file first and only fall
+    # back to an override when that is refused.
+    used_override=0
+    if printf '%s\n' "$out" | sudo tee "$dest" >/dev/null 2>&1; then
+        say "wrote $dest"
+    else
+        say "$dest is not writable, trying an rpm-ostree override"
+        if ! command -v rpm-ostree >/dev/null 2>&1; then
+            echo "error: $dest is not writable and rpm-ostree is not present" >&2
             exit 1
-        }
+        fi
+        if ! rpm-ostree override create --admin "$dest" 2>/dev/null; then
+            echo "error: $dest is not writable and this rpm-ostree has no" >&2
+            echo "  'override create'. On this system /etc is managed by the" >&2
+            echo "  deployment, so the rule has to be placed another way." >&2
+            exit 1
+        fi
+        used_override=1
+        if ! printf '%s\n' "$out" | sudo tee "$dest" >/dev/null; then
+            echo "error: the override was created but the write still failed" >&2
+            exit 1
+        fi
+        say "wrote $dest inside an override"
     fi
-    printf '%s\n' "$out" | sudo tee "$dest" >/dev/null
     sudo udevadm control --reload-rules
     sudo udevadm trigger --subsystem-match=input
     echo >&2
     echo "installed $dest and re-triggered the input subsystem" >&2
     echo >&2
     echo "Now check whether the access appeared:" >&2
-    echo "  getfacl -p /dev/input/event5 2>/dev/null | grep -q "$(id -un)" && echo "ACL present" || echo "no ACL yet"" >&2
+    echo "  getfacl -p /dev/input/event5 2>/dev/null | grep -q \"\$(id -un)\" && echo 'ACL present' || echo 'no ACL yet'" >&2
     echo "  periferia check" >&2
     echo >&2
     echo "If the ACL is still missing, log out and back in: uaccess is applied" >&2
     echo "when the seat claims the device, which only happens on a new session." >&2
     echo >&2
-    if command -v rpm-ostree >/dev/null 2>&1; then
+    if [ "$used_override" -eq 1 ]; then
         cat >&2 <<'EOF'
 The rule now lives in an rpm-ostree override, so it survives updates.
 To undo it:
 
   sudo rpm-ostree override remove /etc/udev/rules.d/10-periferia.rules
+EOF
+    else
+        cat >&2 <<EOF
+To undo it:
+
+  sudo rm -f $dest
 EOF
     fi
 else

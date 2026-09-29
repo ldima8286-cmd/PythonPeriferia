@@ -64,13 +64,6 @@ processing:
 
   enabled: true
 
-tray:
-  show: true
-  overlay: false
-  overlay_corner: top-right
-
-  enabled: true
-
 log:
   level: info
   file: null

@@ -106,9 +106,7 @@ def is_virtual(name: str) -> bool:
         return True
     props = item.get("properties") or {}
     device_class = props.get("device.class")
-    if device_class in ("sound", "monitor"):
-        return False
-    return True
+    return device_class not in ("sound", "monitor")
 
 
 def is_candidate(name: str) -> bool:
@@ -135,6 +133,26 @@ def source_by_module(module_id: int) -> str | None:
     return None
 
 
+def find_source(description: str) -> str | None:
+    """Find a source by the name we asked PipeWire to describe it with.
+
+    module-loopback names its output after the machine, not after us, so the
+    only stable handle is the device.description we passed in.
+    """
+    if not description:
+        return None
+    for item in sources():
+        if item.get("name") == description:
+            return str(description)
+        props = item.get("properties") or {}
+        for key in ("device.description", "node.name"):
+            if props.get(key) == description:
+                name = item.get("name")
+                if name:
+                    return str(name)
+    return None
+
+
 def default_source() -> str | None:
     proc = run([PACTL, "get-default-source"], check=False)
     if proc.returncode != 0:
@@ -148,7 +166,7 @@ def set_default_source(name: str) -> None:
 
 
 def set_volume(name: str, fraction: float) -> None:
-    raw = max(0, min(int(round(fraction * PA_PERCENT)), PA_PERCENT))
+    raw = max(0, min(round(fraction * PA_PERCENT), PA_PERCENT))
     run([PACTL, "set-source-volume", name, str(raw)])
 
 

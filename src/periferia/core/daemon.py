@@ -36,22 +36,37 @@ class Daemon:
             log.info("audio module disabled, nothing to do")
             return False
 
-        virtual = self.mic.setup()
-        if not virtual:
-            log.error("could not create the virtual microphone")
+        physical = self.mic.pick_physical()
+        if not physical:
+            log.error("no physical capture source found")
             return False
 
-        physical = self.mic.physical
-        if physical and self.cfg.processing.enabled:
+        # Processing has to exist before the loopback is built, otherwise the
+        # loopback would copy the raw mic and the noise suppression would go
+        # nowhere.
+        capture = physical
+        if self.cfg.processing.enabled:
             processed = self.processing.start(physical)
-            if processed and processed != virtual:
-                log.warning("processing source %s differs from %s", processed, virtual)
+            if processed:
+                capture = processed
+            else:
+                log.warning(
+                    "mic processing did not start, the virtual mic will carry the raw signal"
+                )
+
+        virtual = self.mic.setup(capture_source=capture)
+        if not virtual:
+            log.error("could not create the virtual microphone")
+            self.processing.stop()
+            return False
 
         if self.cfg.audio.start_muted:
             self.mic.force_silence()
 
         if not self._setup_hotkey():
             log.error("could not set up the hotkey, microphone stays closed")
+            self.mic.teardown()
+            self.processing.stop()
             return False
         return True
 
@@ -120,7 +135,7 @@ class Daemon:
         try:
             listener.open()
         except (OSError, RuntimeError) as exc:
-            log.error("cannot grab the input device: %s", exc)
+            log.error("cannot open the input device: %s", exc)
             log.error("this usually means missing permissions, see docs/udev.md")
             return 1
 

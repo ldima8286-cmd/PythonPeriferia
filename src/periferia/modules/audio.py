@@ -1,9 +1,15 @@
 """Virtual microphone and the volume gate that implements PTT.
 
 The physical microphone is never muted. A module-loopback virtual source is
-created from it and applications (Discord, Zoom, OBS) are pointed at that
-virtual one. PTT then only moves the virtual source's volume, so the
-physical device stays available to everything else.
+created and applications (Discord, Zoom, OBS) are pointed at that virtual one.
+PTT then only moves the virtual source's volume, so the physical device stays
+available to everything else.
+
+The loopback copies from the echo-cancel output when processing is on, not from
+the raw microphone, so suppression and AEC are part of what gets recorded:
+
+    physical mic -> module-echo-cancel -> module-loopback -> apps
+    physical mic ---------------------> module-loopback -> apps
 """
 
 from __future__ import annotations
@@ -56,6 +62,7 @@ class VirtualMic:
         self._physical: str | None = None
         self._volume = 0.0
         self._ramp_thread: threading.Thread | None = None
+        self._ramp_cancel: threading.Event | None = None
         self._held = False
 
     @property
@@ -74,8 +81,20 @@ class VirtualMic:
     def is_open(self) -> bool:
         return self._volume > 0.01
 
-    def setup(self) -> str | None:
-        """Create the virtual source. Idempotent."""
+    def pick_physical(self) -> str | None:
+        """Resolve the real capture device without creating anything yet."""
+        if self._physical is None:
+            self._physical = pick_physical_source(self.cfg.physical_source)
+        return self._physical
+
+    def setup(self, capture_source: str | None = None) -> str | None:
+        """Create the virtual source. Idempotent.
+
+        capture_source is what the loopback copies from. Normally that is the
+        physical microphone, but when mic processing is enabled the daemon
+        passes the echo-cancel output instead, so suppression and AEC end up in
+        the source applications record.
+        """
         with self._lock:
             if self._source and pipewire.source_exists(self._source):
                 return self._source
@@ -88,15 +107,21 @@ class VirtualMic:
                 self._apply(0.0)
                 return existing
 
-            physical = pick_physical_source(self.cfg.physical_source)
-            if not physical:
+            capture = capture_source or self.pick_physical()
+            if not capture:
                 log.error("no physical capture source found")
                 return None
-            self._physical = physical
+            if not self._physical:
+                self._physical = pick_physical_source(self.cfg.physical_source)
 
+            # module-loopback 1.6 documents source= as the node the virtual
+            # source is connected to, and source_output_properties= (not
+            # source_properties=, which it does not know) as the way to name
+            # that source. Passing the wrong property name made the module
+            # register while creating no ports at all.
             args = [
-                f"source={physical}",
-                f"source_properties=device.description={self.cfg.virtual_name}",
+                f"source={capture}",
+                f"source_output_properties=device.description={self.cfg.virtual_name}",
                 "latency_msec=20",
             ]
             module_id = pipewire.load_module("module-loopback", args)
@@ -108,14 +133,37 @@ class VirtualMic:
             self._source = self._find_loopback_source(module_id)
             if not self._source:
                 log.error("loopback loaded but its source could not be found")
+                log.error(
+                    "the module registered but PipeWire never created its ports. "
+                    "Check 'pactl list short modules' for the entry and 'pactl list "
+                    "short sources' for what it produced; if the loopback is there "
+                    "but empty, the capture device it was pointed at is probably "
+                    "unavailable, and 'periferia devices' will show what is visible"
+                )
+                pipewire.unload_module(module_id)
+                self._module_id = None
                 return None
 
-            log.info("virtual mic %s <- %s", self._source, physical)
+            if capture == self._physical:
+                log.info("virtual mic %s <- %s", self._source, capture)
+            else:
+                log.info("virtual mic %s <- %s (processed)", self._source, capture)
             self._apply(0.0)
             return self._source
 
-    def _find_loopback_source(self, module_id: int) -> str | None:
-        return pipewire.source_by_module(module_id)
+    def _find_loopback_source(self, module_id: int, timeout: float = 2.0) -> str | None:
+        """module-loopback creates its ports asynchronously, so right after
+        pactl load-module the source is often missing from pactl's output for a
+        moment. Give it time to appear instead of failing the whole daemon.
+        """
+        deadline = time.monotonic() + timeout
+        while True:
+            found = pipewire.source_by_module(module_id)
+            if found:
+                return found
+            if time.monotonic() >= deadline:
+                return None
+            time.sleep(0.15)
 
     def _apply(self, volume: float) -> None:
         self._volume = max(0.0, min(1.0, volume))
@@ -137,31 +185,36 @@ class VirtualMic:
             steps = max(2, int(duration_ms / 5))
             interval = duration_ms / 1000.0 / steps
             curve = self.cfg.curve
-            slider = self._slider
-            source = self._source or ""
+            cancelled = threading.Event()
+            self._ramp_cancel = cancelled
 
             def worker() -> None:
                 started = time.monotonic()
                 for step in range(1, steps + 1):
+                    if cancelled.is_set():
+                        return
                     progress = min(1.0, (step / steps))
                     value = start + (target - start) * _shape(progress, curve)
-                    try:
-                        slider(source, max(0.0, min(1.0, value)))
-                    except pipewire.PipeWireError:
-                        break
+                    with self._lock:
+                        if cancelled.is_set():
+                            return
+                        self._apply(value)
                     remaining = started + interval * step - time.monotonic()
-                    if remaining > 0:
-                        time.sleep(remaining)
+                    if remaining > 0 and cancelled.wait(remaining):
+                        return
                 with self._lock:
+                    if cancelled.is_set():
+                        return
                     self._volume = target
+                    self._ramp_cancel = None
 
             self._ramp_thread = threading.Thread(target=worker, name="periferia-ramp", daemon=True)
             self._ramp_thread.start()
 
     def _cancel_ramp_locked(self) -> None:
-        thread = self._ramp_thread
-        if thread is not None and thread.is_alive():
-            self._ramp_thread = None
+        if self._ramp_cancel is not None:
+            self._ramp_cancel.set()
+            self._ramp_cancel = None
         self._ramp_thread = None
 
     def open_mic(self) -> None:
@@ -175,7 +228,7 @@ class VirtualMic:
     def panic(self) -> None:
         with self._lock:
             self._held = False
-            self._ramp_thread = None
+            self._cancel_ramp_locked()
         self._apply(0.0)
         if self._source:
             try:
@@ -186,6 +239,8 @@ class VirtualMic:
 
     def force_silence(self) -> None:
         self._held = False
+        with self._lock:
+            self._cancel_ramp_locked()
         self._apply(0.0)
 
     def teardown(self) -> None:

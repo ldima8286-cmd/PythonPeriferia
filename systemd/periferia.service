@@ -4,6 +4,14 @@ Documentation=https://github.com/ldima8286-cmd/PythonPeriferia
 After=pipewire.service pipewire-pulse.service
 Wants=pipewire.service
 
+# Without this the unit restarted every two seconds for as long as the config
+# was wrong. Each attempt creates and destroys the echo-cancel module, which
+# WirePlumber reads as an audio device change, so a misconfiguration turned
+# into a system notification every two seconds. Five attempts, then systemd
+# gives up and stays quiet until the next start.
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
 [Service]
 Type=simple
 ExecStart=%h/.local/bin/periferia-daemon

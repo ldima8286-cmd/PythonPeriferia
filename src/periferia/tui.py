@@ -16,6 +16,7 @@ from __future__ import annotations
 import contextlib
 import logging
 import os
+import re
 import select
 import shutil
 import signal
@@ -83,12 +84,57 @@ def volume_bar(fraction: float | None, width: int = 28) -> str:
     return "#" * filled + "." * (width - filled)
 
 
+ANSI = re.compile(r"\x1b\[[0-9;?]*[a-zA-Z]")
+
+
+def visible_len(text: str) -> int:
+    """Length as the terminal draws it, ignoring colour codes.
+
+    Slicing by len() cuts a coloured line short, because the escape bytes are
+    counted as if they were visible.
+    """
+    return len(ANSI.sub("", text))
+
+
 def fit(text: str, width: int) -> str:
-    if len(text) <= width:
+    """Cut to a visible width, leaving the colour codes intact."""
+    if visible_len(text) <= width:
         return text
     if width <= 1:
         return text[:width]
-    return text[: width - 1] + "…"
+    out: list[str] = []
+    used = 0
+    for piece in ANSI.split(text):
+        # the split yields an empty piece either side of every escape code
+        if not piece:
+            continue
+        if piece.startswith("\x1b"):
+            out.append(piece)
+            continue
+        take = min(len(piece), width - 1 - used)
+        if take <= 0:
+            break
+        out.append(piece[:take])
+        used += take
+    line = "".join(out)
+    # only reopen a style that was actually open, so plain text stays plain
+    return f"{line}{RESET}…" if "\x1b" in line else line + "…"
+
+
+def level_line(app: App) -> str:
+    """The live microphone level, in the middle of the screen, not in a footer.
+
+    Reading it means holding the key and watching this move, which is the whole
+    point of the check. Hiding it in the last line meant a terminal that clipped
+    the footer hid the only evidence anything was happening.
+    """
+    value = app.sample_volume()
+    if value is None:
+        return f"{DIM}live level   {RESET}{YELLOW}no data from pactl{RESET}"
+    return (
+        f"{DIM}live level   {RESET}{volume_bar(value, 24)} "
+        f"{DIM}{value:.0%}{RESET}"
+    )
 
 
 def verdict_line(ok: bool | None, title: str, detail: str = "") -> str:
@@ -140,8 +186,13 @@ class Check:
     def enter(self, app: App) -> None:
         self.reset()
 
+    # how long a check may wait for the user before it gives up and says so
+    timeout = 60.0
+
     def reset(self) -> None:
         self.finished = False
+        self.entered_at = time.monotonic()
+        self.timed_out = False
 
     def update(self, app: App, now: float) -> None:
         return
@@ -343,7 +394,6 @@ class CheckGate(Check):
             self.finished = True
 
     def render(self, app: App, width: int) -> list[str]:
-        fraction = app.sample_volume()
         if self.phase == "done":
             full = self.held_peak >= app.cfg.audio.target_volume * 0.9
             return [
@@ -364,7 +414,9 @@ class CheckGate(Check):
         }[self.phase]
         return [
             f"  {BOLD}{hint}{RESET}",
-            f"  {volume_bar(fraction)} {0 if fraction is None else f'{fraction:.0%}'}",
+            f"  {level_line(app)}",
+            f"  {DIM}the bar has to fill up while you hold "
+            f"{app._ptt_label()}{RESET}",
         ]
 
 
@@ -378,6 +430,7 @@ class CheckPanic(Check):
 
     key = "6"
     title = "Panic key"
+    timeout = 90.0
 
     def reset(self) -> None:
         super().reset()
@@ -423,6 +476,18 @@ class CheckPanic(Check):
         return max(0.0, 12.0 - (time.monotonic() - self.armed_at))
 
     def render(self, app: App, width: int) -> list[str]:
+        if self.phase == "need_open":
+            return [
+                f"  {BOLD}press and hold {app._ptt_label()} first{RESET}",
+                f"  {level_line(app)}",
+                f"  {DIM}the bar has to fill up before panic can be measured{RESET}",
+            ]
+        if self.phase == "armed":
+            return [
+                f"  {BOLD}keep holding, now press {app.cfg.ptt.panic_key}{RESET}",
+                f"  {level_line(app)}",
+                f"  {DIM}the bar has to drop to zero on its own{RESET}",
+            ]
         if not self.saw_panic:
             return [
                 verdict_line(
@@ -453,6 +518,7 @@ class CheckPanic(Check):
 class CheckLock(Check):
     key = "7"
     title = "Screen lock"
+    timeout = 120.0
 
     def reset(self) -> None:
         super().reset()
@@ -463,7 +529,11 @@ class CheckLock(Check):
     def enter(self, app: App) -> None:
         super().enter(app)
         app.heading = "Screen lock"
-        app.note = "hold PTT, then run 'loginctl lock-session' in another terminal"
+        app.note = (
+            "hold PTT, then lock the screen from another terminal. "
+            "Do not press any key here, and do not press the panic key: "
+            "it would close the microphone for the wrong reason."
+        )
         self.watcher = SessionLockWatcher(self._on_lock)
         if not self.watcher.start():
             app.note = "gdbus is unavailable, this check cannot run here"
@@ -519,7 +589,12 @@ class CheckLock(Check):
             "holding": "now lock the session from another terminal",
             "locked": "lock seen, checking the level",
         }[self.phase]
-        return [f"  {BOLD}{hint}{RESET}"]
+        return [
+            f"  {BOLD}{hint}{RESET}",
+            f"  {level_line(app)}",
+            f"  {DIM}in the other terminal run:  loginctl lock-session{RESET}",
+            f"  {DIM}press nothing here. F12 is the panic key, not the lock key{RESET}",
+        ]
 
 
 class CheckCurves(Check):
@@ -767,6 +842,14 @@ class App:
                 now = time.monotonic()
                 if self.current is not None:
                     self.current.update(self, now)
+                    # nothing may wait forever: a check that never finishes
+                    # looks exactly like a check that is working
+                    if (
+                        not self.current.finished
+                        and now - self.current.entered_at > self.current.timeout
+                    ):
+                        self.current.timed_out = True
+                        self.current.finished = True
                 if ch is None:
                     continue
                 if ch in ("q", "\x03"):

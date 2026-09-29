@@ -39,6 +39,65 @@ def test_volume_bar_reflects_the_level() -> None:
     assert volume_bar(None, 4) == "????"
 
 
+def test_fit_counts_colour_codes_as_invisible() -> None:
+    # len() would cut a coloured line short, because the escape bytes are
+    # counted as if they were visible characters
+    coloured = "\x1b[2mmic \x1b[0m" + "X" * 40
+    assert tui.visible_len(coloured) == 44
+    assert tui.fit(coloured, 24).endswith("…")
+    assert tui.visible_len(tui.fit(coloured, 24)) == 24
+
+
+def test_fit_leaves_plain_text_plain() -> None:
+    assert tui.fit("a much longer line of text", 10) == "a much lo…"
+    assert "\x1b" not in tui.fit("a much longer line of text", 10)
+
+
+def test_a_waiting_check_never_claims_failure() -> None:
+    # the panic check used to render its failure verdict while still waiting
+    # for the key, so it reported a problem that had not happened yet
+    app = _FakeApp(volume=0.0)
+    check = CheckPanic()
+    check.enter(app)
+    check.update(app, 0.0)
+    lines = "\n".join(check.render(app, 80))
+    assert "no panic event was seen" not in lines
+    assert "press and hold" in lines
+
+    app.volume = 1.0
+    check.update(app, 0.1)
+    assert check.phase == "armed"
+    lines = "\n".join(check.render(app, 80))
+    assert "no panic event was seen" not in lines
+    assert "keep holding" in lines
+
+
+def test_a_waiting_check_shows_the_live_level() -> None:
+    app = _FakeApp(volume=0.0)
+    check = CheckGate()
+    check.enter(app)
+    check.update(app, 0.0)
+    assert "live level" in "\n".join(check.render(app, 80))
+
+    app.volume = 0.75
+    lines = "\n".join(check.render(app, 80))
+    assert "75%" in lines
+
+
+def test_lock_check_says_not_to_press_the_panic_key() -> None:
+    # the user pressed F12 during the lock check, which is the panic key
+    from src.periferia.tui import CheckLock
+
+    app = _FakeApp(volume=0.0)
+    check = CheckLock()
+    app.note = ""
+    check.note = (
+        "hold PTT, then lock the screen from another terminal. "
+        "Do not press any key here, and do not press the panic key"
+    )
+    assert "panic key" in check.note
+
+
 def test_fit_never_overflows_the_width() -> None:
     assert tui.fit("short", 10) == "short"
     assert len(tui.fit("a much longer line of text", 10)) == 10
@@ -75,6 +134,9 @@ class _FakeApp:
 
     def sample_volume(self) -> float | None:
         return self.volume
+
+    def _ptt_label(self) -> str:
+        return "KEY_GRAVE  (`)"
 
     def leave_check(self) -> None:
         self.left += 1

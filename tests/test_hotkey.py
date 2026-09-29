@@ -113,14 +113,26 @@ class _FakeEvent:
         self.value = value
 
 
+class _FakeCaps:
+    def __init__(self, caps: dict[int, list[int]]) -> None:
+        self._caps = caps
+
+    def get(self, kind: int, default: object = None) -> object:
+        return self._caps.get(kind, default if default is not None else [])
+
+
 class _FakeDev:
     """Stands in for evdev.InputDevice, backed by a real pipe."""
 
-    def __init__(self) -> None:
+    def __init__(self, caps: dict[int, list[int]] | None = None) -> None:
         self.read_fd, self.write_fd = os.pipe()
         self.queued: list[_FakeEvent] = []
         self.calls: list[str] = []
         self.closed = False
+        self._caps = _FakeCaps(caps or {})
+
+    def capabilities(self) -> _FakeCaps:
+        return self._caps
 
     @property
     def fd(self) -> int:
@@ -228,6 +240,92 @@ def test_duplicate_press_does_not_reopen_the_mic() -> None:
     listener._handle(hotkey.ecodes.EV_KEY, 30, hotkey.RELEASE)
     listener._handle(hotkey.ecodes.EV_KEY, 30, hotkey.RELEASE)
     assert got == ["press", "release"]
+
+
+def test_mouse_is_recognised_for_side_button_ptt() -> None:
+    mouse = _FakeDev(
+        {
+            hotkey.ecodes.EV_KEY: [hotkey.ecodes.BTN_LEFT, hotkey.ecodes.BTN_SIDE],
+            hotkey.ecodes.EV_REL: [hotkey.ecodes.REL_X, hotkey.ecodes.REL_Y],
+        }
+    )
+    assert hotkey.is_pointer(mouse) is True
+    # it is a mouse, not a keyboard, so it must not pass the keyboard test
+    assert hotkey.is_keyboard(mouse) is False
+
+    keyboard = _FakeDev(
+        {
+            hotkey.ecodes.EV_KEY: [
+                hotkey.ecodes.KEY_ENTER,
+                hotkey.ecodes.KEY_SPACE,
+                hotkey.ecodes.KEY_GRAVE,
+            ],
+        }
+    )
+    assert hotkey.is_keyboard(keyboard) is True
+    assert hotkey.is_pointer(keyboard) is False
+
+
+def test_side_button_can_be_the_ptt_key() -> None:
+    # BTN_SIDE is a mouse button, and the design calls for using it as PTT
+    got: list[str] = []
+    listener = _listener(_FakeDev())
+    listener.ptt_code = hotkey.ecodes.BTN_SIDE
+    listener.on_press = lambda: got.append("press")
+    listener.on_release = lambda: got.append("release")
+
+    listener._handle(hotkey.ecodes.EV_KEY, hotkey.ecodes.BTN_SIDE, hotkey.PRESS)
+    listener._handle(hotkey.ecodes.EV_KEY, hotkey.ecodes.BTN_SIDE, hotkey.RELEASE)
+    assert got == ["press", "release"]
+
+
+def test_mouse_motion_does_not_trigger_ptt() -> None:
+    # a mouse is watched, but only its buttons may matter
+    got: list[str] = []
+    listener = _listener(_FakeDev())
+    listener.ptt_code = hotkey.ecodes.BTN_SIDE
+    listener.on_press = lambda: got.append("press")
+
+    listener._handle(hotkey.ecodes.EV_REL, hotkey.ecodes.REL_X, 5)
+    listener._handle(hotkey.ecodes.EV_REL, hotkey.ecodes.REL_WHEEL, -1)
+    listener._handle(hotkey.ecodes.EV_KEY, hotkey.ecodes.BTN_LEFT, hotkey.PRESS)
+    assert got == []
+
+
+def test_mouse_is_only_watched_when_the_key_is_a_button(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # reading a mouse needs an extra udev rule, so it must not be opened
+    # unless the PTT key is actually one of its buttons
+    mouse = _FakeDev(
+        {
+            hotkey.ecodes.EV_KEY: [hotkey.ecodes.BTN_LEFT, hotkey.ecodes.BTN_SIDE],
+            hotkey.ecodes.EV_REL: [hotkey.ecodes.REL_X],
+        }
+    )
+    kbd = _FakeDev(
+        {hotkey.ecodes.EV_KEY: [hotkey.ecodes.KEY_ENTER, hotkey.ecodes.KEY_SPACE]}
+    )
+    links = [
+        (Path("/dev/input/event4"), "usb-Vendor_Kbd-event-kbd"),
+        (Path("/dev/input/event9"), "usb-Vendor_Mouse-if01-event-kbd"),
+    ]
+    monkeypatch.setattr(hotkey, "list_input_devices", lambda: links)
+    monkeypatch.setattr(
+        hotkey, "open_device", lambda path: mouse if "event9" in str(path) else kbd
+    )
+
+    plain = hotkey.find_keyboards("auto")
+    assert [str(p) for p in plain] == ["/dev/input/event4"]
+
+    with_mouse = hotkey.find_keyboards("auto", include_pointers=True)
+    assert [str(p) for p in with_mouse] == ["/dev/input/event4", "/dev/input/event9"]
+
+
+def test_is_button_code_tells_keys_from_mouse_buttons() -> None:
+    assert hotkey.is_button_code(hotkey.resolve_key("BTN_SIDE") or 0) is True
+    assert hotkey.is_button_code(hotkey.resolve_key("KEY_GRAVE") or 0) is False
+    assert hotkey.is_button_code(hotkey.resolve_key("KEY_F12") or 0) is False
 
 
 def test_open_does_not_grab_the_keyboard(monkeypatch: pytest.MonkeyPatch) -> None:

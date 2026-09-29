@@ -10,7 +10,12 @@ import time
 from types import FrameType
 
 from ..modules.audio import VirtualMic
-from ..modules.hotkey import HotkeyListener, find_keyboards, resolve_key
+from ..modules.hotkey import (
+    HotkeyListener,
+    find_keyboards,
+    is_button_code,
+    resolve_key,
+)
 from ..modules.processing import MicProcessing
 from . import config as config_mod
 from . import logging_setup
@@ -87,7 +92,11 @@ class Daemon:
             log.error("cannot resolve ptt_key %r", self.cfg.ptt.ptt_key)
             return False
 
-        devices = find_keyboards(self.cfg.ptt.device)
+        # a mouse only gets watched when the PTT key is one of its buttons,
+        # since reading one needs an extra udev rule nobody asked for
+        devices = find_keyboards(
+            self.cfg.ptt.device, include_pointers=is_button_code(code)
+        )
         if not devices:
             log.error("no keyboard device found")
             log.error("run 'periferia check' to see what is visible and unreadable")

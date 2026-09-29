@@ -76,9 +76,7 @@ def resolve_key(name: str) -> int | None:
 def key_label(code: int) -> str:
     if ecodes is None:
         return str(code)
-    name = ecodes.KEY[code]
-    if isinstance(name, tuple):
-        name = name[0]
+    name = code_name(code)
     letter = RU_LETTERS.get(name)
     if letter:
         return f"{letter} ({name.removeprefix('KEY_')})"
@@ -116,6 +114,53 @@ def open_device(path: Path | str) -> Any:
     return InputDevice(str(path), readonly=True)
 
 
+def _first_name(name: str | tuple[str, ...] | None) -> str:
+    """evdev returns a tuple of aliases for some codes, e.g. KEY_HANGEUL."""
+    if name is None:
+        return ""
+    if isinstance(name, tuple):
+        return name[0] if name else ""
+    return name
+
+
+def _build_code_to_name() -> dict[int, str]:
+    """Every code to its first name, keys and buttons alike.
+
+    ecodes.KEY only covers typing keys and holds no mouse buttons at all, so
+    looking a BTN_ code up there returns nothing. ecodes.ecodes maps names to
+    codes for both, so it is inverted to get the reverse lookup.
+    """
+    names: dict[int, list[str]] = {}
+    if ecodes is None:
+        return {}
+    for name, value in ecodes.ecodes.items():
+        codes = value if isinstance(value, tuple) else (value,)
+        for code in codes:
+            if isinstance(code, int):
+                names.setdefault(code, []).append(_first_name(name))
+
+    out: dict[int, str] = {}
+    for code, candidates in names.items():
+        # a code can be spelled several ways, KEY_F12 also being FF_SQUARE.
+        # The KEY_/BTN_ spelling is the one users see on a keycap.
+        preferred = [n for n in candidates if n.startswith(("KEY_", "BTN_"))]
+        out[code] = (preferred or candidates)[0]
+    return out
+
+
+CODE_TO_NAME = _build_code_to_name()
+
+
+def code_name(code: int) -> str:
+    """Name of a key or button code, never None."""
+    return CODE_TO_NAME.get(code) or f"code {code}"
+
+
+def is_button_code(code: int) -> bool:
+    """True for mouse buttons rather than typing keys."""
+    return code_name(code).startswith("BTN_")
+
+
 def is_keyboard(dev: Any) -> bool:
     """True when the device emits ordinary typing keys.
 
@@ -127,8 +172,25 @@ def is_keyboard(dev: Any) -> bool:
         codes = dev.capabilities().get(ecodes.EV_KEY, [])
     except Exception:
         return False
-    names = {ecodes.KEY.get(code) for code in codes}
+    names = {code_name(code) for code in codes}
     return "KEY_ENTER" in names and "KEY_SPACE" in names
+
+
+def is_pointer(dev: Any) -> bool:
+    """True for a device with mouse buttons.
+
+    Mice are included so a side button can drive PTT, which the design calls
+    for. Only EV_KEY is ever read from them, so movement events are ignored
+    by the event loop and watching one costs nothing but a file descriptor.
+    """
+    try:
+        caps = dev.capabilities()
+    except Exception:
+        return False
+    names = {code_name(code) for code in caps.get(ecodes.EV_KEY, [])}
+    has_button = any(n.startswith("BTN_") for n in names)
+    has_motion = bool(caps.get(ecodes.EV_REL)) or bool(caps.get(ecodes.EV_ABS))
+    return has_button and has_motion
 
 
 def physical_device_id(by_id_name: str) -> str:
@@ -146,13 +208,19 @@ def physical_device_id(by_id_name: str) -> str:
     return name
 
 
-def find_keyboards(preferred: str = "auto") -> list[Path]:
+def find_keyboards(
+    preferred: str = "auto", *, include_pointers: bool = False
+) -> list[Path]:
     """Every usable keyboard, not just the first one.
 
     A machine can easily have three: the laptop keyboard, an external USB one
     and a Bluetooth one. Listening to a single device means the PTT key works
     only on that device, which looks like a broken key elsewhere. "auto"
     returns all of them. An explicit value may list several, comma separated.
+
+    Pointing devices are included when `include_pointers` is set, which the
+    daemon does only when the PTT key is a mouse button. Reading a mouse needs
+    an extra udev rule, so nobody should pay for it until they ask for it.
     """
     if InputDevice is None:
         return []
@@ -185,11 +253,12 @@ def find_keyboards(preferred: str = "auto") -> list[Path]:
             log.debug("cannot open %s: %s", target, exc)
             continue
         try:
-            if not is_keyboard(dev):
-                continue
+            usable = is_keyboard(dev) or (include_pointers and is_pointer(dev))
         finally:
             with contextlib.suppress(OSError):
                 dev.close()
+        if not usable:
+            continue
         seen.add(device_id)
         found.append(target)
     return found

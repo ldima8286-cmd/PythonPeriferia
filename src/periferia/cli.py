@@ -61,7 +61,7 @@ def cmd_pick_key(args: argparse.Namespace) -> int:
         print("evdev is not installed: pip install evdev", file=sys.stderr)
         return 1
 
-    devices = hotkey.find_keyboards("auto")
+    devices = hotkey.find_keyboards("auto", include_pointers=not args.only_keyboards)
     if not devices:
         print("no keyboard device found", file=sys.stderr)
         print("run 'periferia check' to see what is visible and what is blocked", file=sys.stderr)
@@ -106,7 +106,7 @@ def cmd_pick_key(args: argparse.Namespace) -> int:
                 for event in dev.read():
                     if event.type != hotkey.ecodes.EV_KEY or event.value != hotkey.PRESS:
                         continue
-                    name = hotkey.ecodes.KEY.get(event.code, str(event.code))
+                    name = hotkey.code_name(event.code)
                     if name == "KEY_ESC":
                         print("cancelled")
                         return 130
@@ -324,6 +324,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     pick = sub.add_parser("pick-key", help="press a key, get the config value for it")
     pick.add_argument("--timeout", type=float, default=30.0, help="give up after this many seconds")
+    pick.add_argument(
+        "--only-keyboards",
+        action="store_true",
+        help="ignore mouse buttons, only listen to typing keys",
+    )
     pick.set_defaults(func=cmd_pick_key)
     sub.add_parser("sources", help="list PipeWire sources").set_defaults(func=cmd_list_sources)
     sub.add_parser("teardown", help="unload leftover echo-cancel modules").set_defaults(

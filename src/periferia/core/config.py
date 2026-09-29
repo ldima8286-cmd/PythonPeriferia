@@ -26,7 +26,6 @@ class AudioConfig:
 
     physical_source: str = "auto"
     virtual_name: str = "PeriferiaMic"
-    channel_map: str = "mono"
 
     attack_ms: int = 10
     release_ms: int = 60
@@ -45,6 +44,7 @@ class PttConfig:
     ptt_key: str = "auto"
     panic_key: str = "KEY_F12"
     device: str = "auto"
+
     ignore_repeat: bool = True
 
     enabled: bool = True

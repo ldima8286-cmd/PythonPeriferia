@@ -110,14 +110,10 @@ def _looks_like_mouse(name: str) -> bool:
 
 
 def _is_keyboard(dev: object) -> bool:
-    from ..modules.hotkey import ecodes
+    # delegates, so "periferia check" and the daemon agree on what a keyboard is
+    from ..modules.hotkey import is_keyboard
 
-    try:
-        caps = dev.capabilities().get(ecodes.EV_KEY, [])  # type: ignore[attr-defined]
-    except Exception:
-        return False
-    names = {ecodes.KEY.get(code) for code in caps}
-    return "KEY_ENTER" in names or "KEY_SPACE" in names
+    return is_keyboard(dev)
 
 
 def check_input_access() -> list[Result]:

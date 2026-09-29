@@ -1,4 +1,4 @@
-"""Thin wrapper over pactl and wpctl.
+"""Thin wrapper over pactl.
 
 Every PipeWire call in the project goes through here, so the rest of the code
 never shells out on its own and every call is easy to fake in tests.
@@ -20,7 +20,6 @@ log = logging.getLogger(__name__)
 
 PACTL = "pactl"
 PW_CLI = "pw-cli"
-WPCTL = "wpctl"
 
 PA_PERCENT = 65536
 NO_MODULE = 4294967295

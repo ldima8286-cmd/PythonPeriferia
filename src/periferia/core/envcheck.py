@@ -36,7 +36,10 @@ def _run(args: list[str], timeout: float = 5.0) -> subprocess.CompletedProcess[s
 
 def check_binaries() -> list[Result]:
     results = []
-    for binary, critical in (("pactl", True), ("wpctl", True), ("pw-cli", False)):
+    # pactl is the only one the project actually calls. wpctl ships in the same
+    # package but is never invoked, and demanding it only makes people install
+    # things for no reason.
+    for binary, critical in (("pactl", True), ("pw-cli", False)):
         path = shutil.which(binary)
         results.append(
             Result(

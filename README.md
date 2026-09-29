@@ -59,6 +59,37 @@ compiler error.
 `pipewire-utils` is part of the Bazzite base image, so `pactl` should be there.
 If `periferia check` says it is not, use a toolbox or a container.
 
+## Checking that it works
+
+`periferia tui` opens a self check in the terminal. Nine checks, each ending in
+a pass or a fail rather than a wall of log output:
+
+| key | check |
+| --- | --- |
+| 1 | environment, binaries, PipeWire, Flatpak audio |
+| 2 | input devices, which are readable, which the daemon would watch |
+| 3 | the virtual microphone exists and is named for applications |
+| 4 | the processing properties really reached the module |
+| 5 | **press and hold the PTT key**, the gate opens and closes |
+| 6 | **panic** closes it instantly, ignoring `hold_ms` |
+| 7 | **lock the session** while holding, the microphone closes |
+| 8 | the three ramp curves, timed |
+| 9 | the configuration actually in effect |
+
+The three marked in bold need you: hold the key, press the panic key, or lock
+the session from another terminal. The rest are automatic, and `a` runs
+everything that needs no input.
+
+It takes over the microphone while it runs, so stop the service first:
+
+```bash
+systemctl --user stop periphery
+periferia tui
+```
+
+It needs no dependencies beyond the standard library, so it works over ssh and
+in a container where a GUI would not start.
+
 ## First run
 
 ```bash

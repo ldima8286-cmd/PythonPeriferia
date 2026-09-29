@@ -199,6 +199,12 @@ def cmd_teardown(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_tui(args: argparse.Namespace) -> int:
+    from .tui import run
+
+    return run(config_mod.load(args.config))
+
+
 def cmd_ramp(args: argparse.Namespace) -> int:
     """Manual volume ramp, to check for clicks and latency before PTT exists."""
     import time
@@ -353,6 +359,9 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("install-service", help="install the systemd user unit")
     p.add_argument("--force", action="store_true")
     p.set_defaults(func=cmd_install_service)
+
+    p = sub.add_parser("tui", help="interactive self check in the terminal")
+    p.set_defaults(func=cmd_tui)
 
     return parser
 

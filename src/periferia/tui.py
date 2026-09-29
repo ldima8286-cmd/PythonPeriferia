@@ -554,6 +554,7 @@ class CheckLock(Check):
         self.phase = "need_open"
         self.closed_after_lock: bool | None = None
         self.locked_at = 0.0
+        self.reason = ""
 
     def enter(self, app: App) -> None:
         super().enter(app)
@@ -564,7 +565,8 @@ class CheckLock(Check):
             # Do not invent a cause. "gdbus is unavailable" was shown for every
             # failure, including logind answering perfectly well on the wrong
             # bus, which is what sent the hunt in the wrong direction twice.
-            app.note = self.watcher.reason or "screen lock detection is unavailable"
+            self.reason = self.watcher.reason or "screen lock detection is unavailable"
+            app.note = self.reason
             self.phase = "done"
             self.finished = True
 
@@ -601,7 +603,8 @@ class CheckLock(Check):
 
     def render(self, app: App, width: int) -> list[str]:
         if not getattr(self, "watcher", None):
-            return [verdict_line(None, "screen lock", "gdbus missing, cannot test")]
+            reason = getattr(self, "reason", "") or "screen lock detection is unavailable"
+            return [verdict_line(None, "screen lock", reason)]
         if self.phase == "done":
             return [
                 verdict_line(

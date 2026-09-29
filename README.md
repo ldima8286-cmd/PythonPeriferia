@@ -30,8 +30,32 @@ bash scripts/dev-setup.sh
 source .venv/bin/activate
 ```
 
-Needs Python 3.11+ and `pipewire-utils`. On Arch the audio packages are usually
-present already; elsewhere: `sudo apt install pipewire wireplumber pipewire-utils`.
+Needs Python 3.11+ and `pipewire-utils`.
+
+### On Fedora Atomic, Bazzite and other immutable systems
+
+`dnf` does not install software there, `rpm-ostree` does it by changing the
+whole system and needs a reboot. Neither is needed here.
+
+`evdev` is a C extension, so pip tries to compile it and needs `Python.h`.
+On an immutable system that header is not in the base image. The fix is `uv`,
+which brings its own interpreter, headers included, so nothing has to be
+compiled:
+
+```bash
+curl -LsSf https://astral.sh/uv/install.sh | sh
+rm -rf .venv
+bash scripts/dev-setup.sh
+source ~/.bashrc   # so uv is on PATH in new shells
+```
+
+The script uses `uv` when it finds it and targets Python 3.13, for which `evdev`
+ships manylinux wheels. On an immutable system without `uv` it stops and says
+so, rather than falling back to the system Python and failing later with a
+compiler error.
+
+`pipewire-utils` is part of the Bazzite base image, so `pactl` should be there.
+If `periferia check` says it is not, use a toolbox or a container.
 
 ## First run
 
@@ -57,10 +81,11 @@ will be able to see the audio. If key events are not readable, see
 ## Usage
 
 ```bash
-periferia daemon        # or: python -m periferia.core.daemon
+periferia-daemon          # installed by scripts/dev-setup.sh
 ```
 
-Hold the key: mic opens. Release: mic closes after `hold_ms`.
+Hold the key: mic opens. Release: mic closes after `hold_ms`. The daemon only
+reads the keyboard, it never grabs it, so your typing keeps working normally.
 
 | command | what it does |
 | --- | --- |

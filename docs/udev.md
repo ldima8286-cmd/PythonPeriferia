@@ -21,21 +21,21 @@ You only need the rules below if the check shows devices as unreadable, or if
 
 ## If you do need them
 
-Find the vendor and product ids of your keyboard:
+Do not write the rule by hand. The generator reads the real vendor and product
+ids off the devices it finds:
 
 ```bash
-udevadm info -a -n /dev/input/event5 | grep -E 'id=|PRODUCT='
+bash scripts/gen-udev-rules.sh             # print the rule, nothing is changed
+bash scripts/gen-udev-rules.sh --install   # write it to /etc/udev/rules.d/ and reload
 ```
 
-Put those numbers into `udev/10-periferia.rules`, then:
+Then log out and back in and run `periferia check` again.
+
+To look at what it found:
 
 ```bash
-sudo cp udev/10-periferia.rules /etc/udev/rules.d/
-sudo udevadm control --reload-rules
-sudo udevadm trigger
+udevadm info -q property -n /dev/input/event5 | grep -E 'ID_VENDOR_ID|ID_MODEL_ID'
 ```
-
-Log out and back in, then run `periferia check` again.
 
 `TAG+="uaccess"` is the important part. It hands the device to whoever is
 logged in on the active seat, which is the same mechanism used for
@@ -51,6 +51,24 @@ enough.
 
 The unit in `systemd/periferia.service` already sets `NoNewPrivileges` and
 `ProtectSystem=strict`.
+
+## On Bazzite and other immutable systems
+
+Device access is the same as on a normal Fedora install, because the rules go
+into `/etc/udev/rules.d/`. On an atomic system `/etc` is rebuilt from the
+image on every update, so a file written there disappears. Keep the generated
+file in the repository and record the override:
+
+```bash
+bash scripts/gen-udev-rules.sh > udev/10-periferia.rules
+sudo rpm-ostree override replace /etc/udev/rules.d/10-periferia.rules \
+     ./udev/10-periferia.rules
+```
+
+The generator prints a reminder about this when installed with `--install`.
+
+Again, first run `periferia check` and skip all of this if it already says the
+devices are readable. On most systems logind grants access on its own.
 
 ## Debugging reads
 

@@ -1,24 +1,24 @@
 # Periferia: read access to input devices.
 #
-# Check first whether you already have access. logind normally grants the
-# logged-in user ACLs on the devices of their own session, and if
-# "periferia check" says the devices are readable, this file is NOT needed.
+# This file is a template. Do not install it as is, the vendor and product ids
+# below are placeholders. Generate a real rule from the hardware you actually
+# have:
 #
-# Install (adjust the vendor/product ids from your own device):
-#   sudo cp udev/10-periferia.rules /etc/udev/rules.d/
-#   sudo udevadm control --reload-rules
-#   sudo udevadm trigger
+#   bash scripts/gen-udev-rules.sh             # print it
+#   bash scripts/gen-udev-rules.sh --install   # write it and reload udev
 #
-# Then log out and back in.
+# Check first whether you even need it. logind normally grants the logged-in
+# user ACLs on the devices of their own seat, and if "periferia check" says the
+# devices are readable, this file is unnecessary.
 #
-# Find your ids with:
-#   udevadm info -a -n /dev/input/event5 | grep -E 'id=|PRODUCT='
+# TAG+="uaccess" is the part that matters. It hands the device to whoever is
+# logged in on the active seat, the same mechanism used for /dev/snd. It is
+# narrower than MODE="0666" and does not expose your keyboard to every user on
+# the machine.
+#
+# REPLACEME_VENDOR and REPLACEME_PRODUCT are the values printed by:
+#   udevadm info -q property -n /dev/input/event5 | grep -E 'ID_VENDOR_ID|ID_MODEL_ID'
 
 ACTION=="add|change", KERNEL=="event*", SUBSYSTEM=="input", \
-  ATTRS{idVendor}=="258a", ATTRS{idProduct}=="1007", \
-  TAG+="uaccess", MODE="0660"
-
-# Same, for the built-in laptop keyboard if it needs it.
-ACTION=="add|change", KERNEL=="event*", SUBSYSTEM=="input", \
-  ATTRS{idVendor}=="0fe2", ATTRS{idProduct}=="8176", \
+  ATTRS{idVendor}=="REPLACEME_VENDOR", ATTRS{idProduct}=="REPLACEME_PRODUCT", \
   TAG+="uaccess", MODE="0660"

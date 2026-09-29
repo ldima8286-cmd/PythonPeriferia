@@ -23,13 +23,13 @@ classifiers = [
 
 dependencies = [
     "PyYAML>=6.0",
-    "evdev>=1.6.1",
+    "evdev>=2.0.0",
 ]
 
 [project.optional-dependencies]
 gui = ["PySide6>=6.6"]
 xkb = ["pyxkbcommon>=1.5"]
-dev = ["pytest>=8.0", "ruff>=0.6", "mypy>=1.11"]
+dev = ["pytest>=8.0", "ruff>=0.6", "mypy>=1.11", "types-PyYAML>=6.0"]
 
 [project.scripts]
 periferia = "periferia.cli:main"
@@ -49,6 +49,9 @@ target-version = "py311"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM", "ASYNC", "RUF"]
+# RUF001/002/003: the Russian keyboard map is deliberately full of Cyrillic
+# letters that look like Latin ones ("М" vs "M"), so homoglyph warnings are noise.
+ignore = ["RUF001", "RUF002", "RUF003"]
 
 [tool.mypy]
 python_version = "3.11"
@@ -59,3 +62,4 @@ files = ["src/periferia"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+pythonpath = ["src"]

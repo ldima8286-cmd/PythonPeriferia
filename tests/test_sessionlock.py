@@ -100,3 +100,52 @@ def test_degradation_when_the_monitor_dies() -> None:
     assert watcher.available is False
     # a dead watcher must not raise when the main loop keeps ticking
     watcher.poll()
+
+
+def test_logind_is_asked_on_the_system_bus(monkeypatch: pytest.MonkeyPatch) -> None:
+    # logind is a system service. Asking on the session bus returns
+    # "The name is not activatable", which turned lock protection off silently
+    # on a machine that has it working.
+    seen: list[list[str]] = []
+
+    class _Proc:
+        stdout = "/org/freedesktop/login1/session/_32"
+        stderr = ""
+        returncode = 0
+
+    def _run(cmd: list[str], **kwargs: object) -> _Proc:
+        seen.append(cmd)
+        return _Proc()
+
+    monkeypatch.setenv("XDG_SESSION_ID", "32")
+    monkeypatch.setattr(sessionlock.subprocess, "run", _run)
+
+    assert sessionlock.session_object_path() == "/org/freedesktop/login1/session/_32"
+    assert "--system" in seen[0]
+    assert "--session" not in seen[0]
+
+
+def test_the_watch_is_set_up_on_the_system_bus(monkeypatch: pytest.MonkeyPatch) -> None:
+    started: list[list[str]] = []
+
+    class _Popen:
+        stdout = None
+        stderr = None
+
+        def __init__(self, cmd: list[str], **kwargs: object) -> None:
+            started.append(cmd)
+
+        def terminate(self) -> None:
+            pass
+
+        def wait(self, timeout: float = 0) -> int:
+            return 0
+
+    monkeypatch.setattr(sessionlock, "session_object_path", lambda *a, **k: "/p")
+    monkeypatch.setattr(sessionlock.subprocess, "Popen", _Popen)
+
+    watcher = sessionlock.SessionLockWatcher(lambda: None)
+    assert watcher.start() is True
+    assert "--system" in started[0]
+    assert "--session" not in started[0]
+    watcher.stop()

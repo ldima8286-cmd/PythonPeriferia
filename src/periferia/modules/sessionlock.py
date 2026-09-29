@@ -25,6 +25,10 @@ BUS_NAME = "org.freedesktop.login1"
 MANAGER_PATH = "/org/freedesktop/login1"
 SESSION_IFACE = "org.freedesktop.login1.Session"
 GET_SESSION = "org.freedesktop.login1.Manager.GetSession"
+# logind is a system service. Asking for it on the session bus always fails
+# with "The name is not activatable", which is what silently turned screen
+# lock protection off on a machine that has it.
+BUS_FLAG = "--system"
 
 
 def parse_lock_hint(line: str) -> bool | None:
@@ -61,7 +65,7 @@ def session_object_path(command: str = "gdbus") -> str | None:
             [
                 command,
                 "call",
-                "--session",
+                BUS_FLAG,
                 "--dest",
                 BUS_NAME,
                 "--object-path",
@@ -116,7 +120,7 @@ class SessionLockWatcher:
                 [
                     self.command,
                     "monitor",
-                    "--session",
+                    BUS_FLAG,
                     "--dest",
                     BUS_NAME,
                     "--object-path",

@@ -6,8 +6,10 @@ import argparse
 import contextlib
 import json
 import re
+import select
 import shutil
 import sys
+import time
 from pathlib import Path
 
 from .core import config as config_mod
@@ -64,8 +66,8 @@ def cmd_pick_key(args: argparse.Namespace) -> int:
         return 1
 
     print(f"listening on {device}")
-    print("the keyboard is grabbed while this runs, so nothing reaches other apps")
-    print("press the key you want for PTT, Esc cancels\n")
+    print("press the key you want for PTT, Esc cancels")
+    print("the device is not grabbed, other programs still see the keypress\n")
 
     try:
         dev = hotkey.open_device(device)
@@ -74,29 +76,40 @@ def cmd_pick_key(args: argparse.Namespace) -> int:
         print("this usually means missing permissions, see docs/udev.md", file=sys.stderr)
         return 1
 
+    deadline = time.monotonic() + args.timeout
     try:
-        dev.grab()
-        for _dev, event in dev.read_loop():
-            if event.type != hotkey.ecodes.EV_KEY or event.value != hotkey.PRESS:
+        while time.monotonic() < deadline:
+            # The same select() plus read() the daemon uses. evdev 2.0 yields
+            # single InputEvent objects from read(), while the 1.x API this
+            # used to call returned (device, event) pairs, and unpacking one
+            # of those objects failed before any key could be picked.
+            try:
+                readable, _, _ = select.select([dev.fd], [], [], 0.5)
+            except OSError as exc:
+                print(f"input device disappeared: {exc}", file=sys.stderr)
+                return 1
+            if not readable:
                 continue
-            name = hotkey.ecodes.KEY.get(event.code, str(event.code))
-            if name == "KEY_ESC":
-                print("cancelled")
-                return 130
-            label = hotkey.key_label(event.code)
-            print(f"\n  key   {name}")
-            print(f"  label {label}")
-            print(f"\nyaml:   ptt_key: \"{name}\"")
-            return 0
+            for event in dev.read():
+                if event.type != hotkey.ecodes.EV_KEY or event.value != hotkey.PRESS:
+                    continue
+                name = hotkey.ecodes.KEY.get(event.code, str(event.code))
+                if name == "KEY_ESC":
+                    print("cancelled")
+                    return 130
+                label = hotkey.key_label(event.code)
+                print(f"\n  key   {name}")
+                print(f"  label {label}")
+                print(f"\nyaml:   ptt_key: \"{name}\"")
+                return 0
+        print("\nnothing pressed, giving up", file=sys.stderr)
+        return 1
     except KeyboardInterrupt:
         print("\ncancelled")
         return 130
     finally:
-        try:
-            dev.ungrab()
+        with contextlib.suppress(OSError):
             dev.close()
-        except OSError:
-            pass
     return 1
 
 
@@ -295,9 +308,9 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("devices", help="list input devices that look like keyboards").set_defaults(
         func=cmd_devices
     )
-    sub.add_parser("pick-key", help="press a key, get the config value for it").set_defaults(
-        func=cmd_pick_key
-    )
+    pick = sub.add_parser("pick-key", help="press a key, get the config value for it")
+    pick.add_argument("--timeout", type=float, default=30.0, help="give up after this many seconds")
+    pick.set_defaults(func=cmd_pick_key)
     sub.add_parser("sources", help="list PipeWire sources").set_defaults(func=cmd_list_sources)
     sub.add_parser("teardown", help="unload leftover echo-cancel modules").set_defaults(
         func=cmd_teardown

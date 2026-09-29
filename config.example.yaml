@@ -57,11 +57,6 @@ ptt:
 
   # Close the mic when the session locks. Keep true: walking away from the
   # desk while holding the key would otherwise leave the mic open in an empty
-  # room, and a screen lock is the most likely way that happens. Needs gdbus,
-  # which every GNOME and KDE install already has. Without it the daemon says
-  # so in the log and keeps working.
-  release_on_lock: true
-
   # Cut off a key held longer than this, in ms. 0 disables. A last resort
   # against a press that never gets a matching release, since the key is not
   # grabbed and events can be lost. 300000 is five minutes.

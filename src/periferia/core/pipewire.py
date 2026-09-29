@@ -160,14 +160,15 @@ def stale_modules(module_name: str, description: str) -> list[int]:
             owners.add(owner)
     if not owners:
         return []
-    out: list[int] = []
-    for item in modules():
-        if item.get("name") != module_name:
-            continue
-        module_id = item.get("id")
-        if isinstance(module_id, int) and module_id in owners:
-            out.append(module_id)
-    return out
+    # "pactl list short modules" reports only name and argument, never an id,
+    # so the owners found above cannot be matched against it by id. Confirm
+    # the module is ours through the description we asked it to carry instead,
+    # then unload the owners we already trust.
+    ours = any(
+        item.get("name") == module_name and description in (item.get("argument") or "")
+        for item in modules()
+    )
+    return sorted(owners) if ours else []
 
 
 def unload_stale(module_name: str, description: str) -> list[int]:

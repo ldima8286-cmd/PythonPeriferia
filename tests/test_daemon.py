@@ -76,7 +76,6 @@ class _Processing:
 
 def _daemon(listener: _Listener) -> Daemon:
     cfg = config_mod.Config()
-    cfg.ptt.release_on_lock = False
     daemon = Daemon(cfg)
     daemon.mic = _Mic()  # type: ignore[assignment]
     daemon.processing = _Processing(cfg.processing)  # type: ignore[assignment]
@@ -131,13 +130,13 @@ def test_setup_failure_needs_no_cleanup() -> None:
     assert not daemon.processing.stopped
 
 
-@pytest.mark.parametrize("event", ["press", "release", "panic", "lock"])
+@pytest.mark.parametrize("event", ["press", "release", "panic"])
 def test_state_changes_are_recorded_for_callers(event: str) -> None:
     # the self check reads these instead of guessing from the output level
     daemon = _daemon(_Listener())
     before = len(daemon.events(event))
 
-    getattr(daemon, {"lock": "on_session_locked"}.get(event, f"on_{event}"))()
+    getattr(daemon, f"on_{event}")()
 
     assert len(daemon.events(event)) == before + 1
 

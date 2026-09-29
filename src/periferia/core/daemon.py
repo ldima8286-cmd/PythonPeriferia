@@ -18,7 +18,6 @@ from ..modules.hotkey import (
     resolve_key,
 )
 from ..modules.processing import MicProcessing
-from ..modules.sessionlock import SessionLockWatcher
 from . import config as config_mod
 from . import logging_setup
 
@@ -36,7 +35,6 @@ class Daemon:
         self.processing = MicProcessing(cfg.processing)
         self._release_at: float | None = None
         self._pressed_at: float | None = None
-        self._lock: SessionLockWatcher | None = None
         self._stop = threading.Event()
         self._listener: HotkeyListener | None = None
         # Timestamps of the last few state changes, so a caller can tell what
@@ -165,11 +163,6 @@ class Daemon:
         # which is coarse enough to hide a correct panic behind a slow sample.
         self._record("panic-closed")
 
-    def on_session_locked(self) -> None:
-        """Close the microphone without waiting for a key that may not come."""
-        self._record("lock")
-        self.force_release("session locked")
-
     def force_release(self, why: str) -> None:
         """Shut the mic now and forget that the key was held.
 
@@ -214,7 +207,6 @@ class Daemon:
         listener = self._listener
         assert listener is not None
         opened = False
-        locked_watch = False
 
         try:
             try:
@@ -225,17 +217,12 @@ class Daemon:
                 log.error("this usually means missing permissions, see docs/udev.md")
                 return 1
 
-            self._watch_session_lock()
-            locked_watch = self._lock is not None
-
             log.info(
                 "periferia is running, mic %s, press Ctrl+C to stop", self.mic.source
             )
 
             while not self._stop.is_set():
                 listener.poll(timeout=0.2)
-                if self._lock is not None:
-                    self._lock.poll()
                 self._expire_hold()
                 self._expire_stuck_hold()
         except KeyboardInterrupt:
@@ -249,22 +236,10 @@ class Daemon:
             # next run then collided with it on the source name
             if opened:
                 listener.close()
-            if locked_watch and self._lock is not None:
-                self._lock.stop()
-                self._lock = None
             self.mic.force_silence()
             self.processing.stop()
             self.mic.teardown()
         return 0
-
-    def _watch_session_lock(self) -> None:
-        if not self.cfg.ptt.release_on_lock:
-            log.info("release_on_lock is off, a locked session will not close the mic")
-        else:
-            self._lock = SessionLockWatcher(self.on_session_locked)
-            if not self._lock.start():
-                self._lock = None
-                log.info("continuing without screen lock protection")
 
     def stop(self, signum: int, frame: FrameType | None) -> None:
         log.info("signal %s, shutting down", signum)

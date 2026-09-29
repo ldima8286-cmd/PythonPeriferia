@@ -49,7 +49,6 @@ class PttConfig:
 
     # Close the mic when the session locks. Without it, walking away while
     # holding the key leaves the mic open in an empty room.
-    release_on_lock: bool = True
 
     # Cut off a key that has been held this long, in ms. 0 disables it.
     # A last resort against a press that never gets a release.

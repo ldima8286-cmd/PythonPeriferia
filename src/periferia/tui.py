@@ -33,7 +33,6 @@ from .core import envcheck, pipewire
 from .core.config import Config
 from .core.daemon import Daemon
 from .modules import hotkey
-from .modules.sessionlock import SessionLockWatcher
 
 RESPONDED = 0.05  # level that counts as "the gate moved at all"
 
@@ -540,101 +539,8 @@ class CheckPanic(Check):
         return max(300.0, app.cfg.audio.hold_ms / 2.0)
 
 
-class CheckLock(Check):
-    key = "7"
-    title = "Screen lock (locks your display)"
-    lock_hint = (
-        "There is no key for this. Periferia watches the session lock signal "
-        "from the system, so the screen has to be locked for real."
-    )
-    timeout = 120.0
-
-    def reset(self) -> None:
-        super().reset()
-        self.phase = "need_open"
-        self.closed_after_lock: bool | None = None
-        self.locked_at = 0.0
-        self.reason = ""
-
-    def enter(self, app: App) -> None:
-        super().enter(app)
-        app.heading = "Screen lock"
-        app.note = self.lock_hint
-        self.watcher = SessionLockWatcher(self._on_lock)
-        if not self.watcher.start():
-            # Do not invent a cause. "gdbus is unavailable" was shown for every
-            # failure, including logind answering perfectly well on the wrong
-            # bus, which is what sent the hunt in the wrong direction twice.
-            self.reason = self.watcher.reason or "screen lock detection is unavailable"
-            app.note = self.reason
-            self.phase = "done"
-            self.finished = True
-
-    def _on_lock(self) -> None:
-        self.phase = "locked"
-        self.locked_at = time.monotonic()
-
-    def update(self, app: App, now: float) -> None:
-        if self.finished:
-            return
-        if self.watcher is not None:
-            self.watcher.poll()
-        fraction = app.sample_volume()
-        if self.phase == "need_open":
-            if fraction is not None and fraction > 0.5:
-                self.phase = "holding"
-        elif self.phase == "locked":
-            # the daemon runs its own watcher, so the level will not have
-            # dropped yet on the frame the lock is noticed. Give it a moment
-            # instead of failing a feature that is working.
-            if fraction is not None and fraction < 0.02:
-                self.closed_after_lock = True
-                self.phase = "done"
-                self.finished = True
-            elif time.monotonic() - self.locked_at > 2.0:
-                self.closed_after_lock = False
-                self.phase = "done"
-                self.finished = True
-
-    def on_key(self, app: App, ch: str) -> None:
-        super().on_key(app, ch)
-        if ch == "\x1b" and self.watcher is not None:
-            self.watcher.stop()
-
-    def render(self, app: App, width: int) -> list[str]:
-        if not getattr(self, "watcher", None):
-            reason = getattr(self, "reason", "") or "screen lock detection is unavailable"
-            return [verdict_line(None, "screen lock", reason)]
-        if self.phase == "done":
-            return [
-                verdict_line(
-                    bool(self.closed_after_lock),
-                    "lock closed the microphone",
-                    "the key is still held but the mic is shut"
-                    if self.closed_after_lock
-                    else "the microphone stayed open",
-                )
-            ]
-        hint = {
-            "need_open": "hold the PTT key",
-            "holding": "now lock the session from another terminal",
-            "locked": "lock seen, checking the level",
-        }[self.phase]
-        return [
-            f"  {BOLD}{hint}{RESET}",
-            f"  {level_line(app)}",
-            "",
-            f"  {DIM}There is no lock key to press.{RESET}",
-            f"  {DIM}On KDE press  Ctrl+Alt+L  on this screen.{RESET}",
-            f"  {DIM}Or in another terminal:  loginctl lock-session{RESET}",
-            "",
-            f"  {DIM}Press nothing here. F12 is the panic key, and pressing it{RESET}",
-            f"  {DIM}would close the microphone for the wrong reason.{RESET}",
-        ]
-
-
 class CheckCurves(Check):
-    key = "8"
+    key = "7"
     title = "Ramp curves"
 
     def enter(self, app: App) -> None:
@@ -686,7 +592,7 @@ class CheckCurves(Check):
 
 
 class CheckConfig(Check):
-    key = "9"
+    key = "8"
     title = "Configuration in effect"
 
     def enter(self, app: App) -> None:
@@ -731,7 +637,6 @@ class App:
             CheckProcessing(),
             CheckGate(),
             CheckPanic(),
-            CheckLock(),
             CheckCurves(),
             CheckConfig(),
         ]
@@ -900,7 +805,7 @@ class App:
                     self.enter_check(int(ch) - 1)
                 elif ch == "a":
                     for check in self.checks:
-                        if isinstance(check, (CheckGate, CheckPanic, CheckLock)):
+                        if isinstance(check, (CheckGate, CheckPanic)):
                             continue
                         self.enter_check(self.checks.index(check))
                         self.current = None

@@ -196,10 +196,18 @@ def test_stale_detection_ignores_other_apps(monkeypatch: pytest.MonkeyPatch) -> 
             "properties": {"device.description": "Zoom"},
         },
     ]
+    # "list short modules" reports no id, so ownership is confirmed through
+    # the description the module was asked to carry.
     modules = [
-        {"id": 7, "name": "module-echo-cancel"},
-        {"id": 9, "name": "module-echo-cancel"},
-        {"id": 11, "name": "module-loopback"},
+        {
+            "name": "module-echo-cancel",
+            "argument": "source=x source_properties=device.description=PeriferiaMic",
+        },
+        {
+            "name": "module-echo-cancel",
+            "argument": "source=y source_properties=device.description=Zoom",
+        },
+        {"name": "module-loopback", "argument": "source.z=1"},
     ]
     monkeypatch.setattr(pipewire_mod, "sources", lambda: listed)
     monkeypatch.setattr(pipewire_mod, "modules", lambda: modules)
@@ -207,3 +215,67 @@ def test_stale_detection_ignores_other_apps(monkeypatch: pytest.MonkeyPatch) -> 
     assert pipewire_mod.stale_modules("module-echo-cancel", "PeriferiaMic") == [7]
     assert pipewire_mod.stale_modules("module-echo-cancel", "") == []
     assert pipewire_mod.stale_modules("module-loopback", "PeriferiaMic") == []
+
+
+def test_stale_modules_finds_a_leftover_without_a_module_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Exactly what pactl returns: "list short modules" has no id field at all,
+    # only name and argument. Matching owners against a missing id is what
+    # made this silently find nothing, so cleanup never ran and a killed run
+    # left its module up forever.
+    monkeypatch.setattr(
+        pipewire_mod,
+        "sources",
+        lambda: [
+            {
+                "name": "echo-cancel-source",
+                "owner_module": 536870917,
+                "properties": {
+                    "device.description": "PeriferiaMic",
+                    "node.name": "echo-cancel-source",
+                },
+            }
+        ],
+    )
+    monkeypatch.setattr(
+        pipewire_mod,
+        "modules",
+        lambda: [
+            {"name": "libpipewire-module-rt", "argument": ""},
+            {
+                "name": "module-echo-cancel",
+                "argument": (
+                    "source=alsa_input.pci-0000_00_1f.3.analog-stereo "
+                    "aec_methods=aec3 source_properties=device.description=PeriferiaMic"
+                ),
+            },
+        ],
+    )
+
+    assert pipewire_mod.stale_modules("module-echo-cancel", "PeriferiaMic") == [536870917]
+
+
+def test_stale_modules_ignores_a_module_that_is_not_ours(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The owner has to be ours before it gets unloaded, or Periferia would
+    # tear down somebody else's module.
+    monkeypatch.setattr(
+        pipewire_mod,
+        "sources",
+        lambda: [
+            {
+                "name": "echo-cancel-source",
+                "owner_module": 42,
+                "properties": {"device.description": "PeriferiaMic"},
+            }
+        ],
+    )
+    monkeypatch.setattr(
+        pipewire_mod,
+        "modules",
+        lambda: [{"name": "module-echo-cancel", "argument": "source=whatever"}],
+    )
+
+    assert pipewire_mod.stale_modules("module-echo-cancel", "PeriferiaMic") == []

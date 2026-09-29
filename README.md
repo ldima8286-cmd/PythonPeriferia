@@ -61,7 +61,7 @@ If `periferia check` says it is not, use a toolbox or a container.
 
 ## Checking that it works
 
-`periferia tui` opens a self check in the terminal. Nine checks, each ending in
+`periferia tui` opens a self check in the terminal. Eight checks, each ending in
 a pass or a fail rather than a wall of log output:
 
 | key | check |
@@ -72,12 +72,11 @@ a pass or a fail rather than a wall of log output:
 | 4 | the processing properties really reached the module |
 | 5 | **press and hold the PTT key**, the gate opens and closes |
 | 6 | **panic** closes it instantly, ignoring `hold_ms` |
-| 7 | **lock the session** while holding, the microphone closes |
-| 8 | the three ramp curves, timed |
-| 9 | the configuration actually in effect |
+| 7 | the three ramp curves, timed |
+| 8 | the configuration actually in effect |
 
-Checks 5, 6 and 7 need you: hold the key, press the panic key, or lock
-the session from another terminal. The rest are automatic, and `a` runs
+Checks 5 and 6 need you: hold the key, then press the panic key. The rest are
+automatic, and `a` runs
 everything that needs no input.
 
 It takes over the microphone while it runs, so stop the service first:
@@ -146,21 +145,12 @@ reads the keyboard, it never grabs it, so your typing keeps working normally.
 | `ptt.ptt_key` | auto | physical key, see below |
 | `ptt.device` | auto | which keyboards to watch, see below |
 | `ptt.panic_key` | KEY_F12 | instant mute, ignores `hold_ms` |
-| `ptt.release_on_lock` | true | close the mic when the session locks |
 | `ptt.max_press_ms` | 300000 | cut off a key held longer than this, 0 disables |
 
 ## Safety
 
-The microphone is the one thing in this program that can embarrass you, so two
-guards exist besides the key itself.
-
-`release_on_lock` closes the microphone when the session locks. Walking away
-from the desk while holding PTT would otherwise leave it transmitting in an
-empty room, and locking the screen is the most likely moment for that. It
-works by watching `org.freedesktop.login1.Session.LockHint` through `gdbus`,
-which is already installed on any GNOME or KDE system. If `gdbus` is missing
-the daemon says so in the log and carries on, because losing this protection
-must not cost you your PTT.
+The microphone is the one thing in this program that can embarrass you, so a
+guard exists besides the key itself.
 
 `max_press_ms` cuts off a key held longer than five minutes. The keyboard is
 not grabbed, so events can be lost, and a press without its release would

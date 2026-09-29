@@ -9,7 +9,8 @@ interactive checks.
 from __future__ import annotations
 
 from src.periferia import tui
-from src.periferia.tui import Check, CheckGate, CheckPanic, volume_bar, volume_fraction
+from src.periferia.core import config as config_mod
+from src.periferia.tui import App, Check, CheckGate, CheckPanic, volume_bar, volume_fraction
 
 
 def test_volume_fraction_reads_the_first_channel() -> None:
@@ -82,20 +83,6 @@ def test_a_waiting_check_shows_the_live_level() -> None:
     app.volume = 0.75
     lines = "\n".join(check.render(app, 80))
     assert "75%" in lines
-
-
-def test_lock_check_says_not_to_press_the_panic_key() -> None:
-    # the user pressed F12 during the lock check, which is the panic key
-    from src.periferia.tui import CheckLock
-
-    app = _FakeApp(volume=0.0)
-    check = CheckLock()
-    app.note = ""
-    check.note = (
-        "hold PTT, then lock the screen from another terminal. "
-        "Do not press any key here, and do not press the panic key"
-    )
-    assert "panic key" in check.note
 
 
 def test_fit_never_overflows_the_width() -> None:
@@ -346,3 +333,10 @@ def test_enter_resets_a_previous_run() -> None:
     check.enter(app)
     assert check.finished is False
     assert check.phase == "idle"
+
+
+def test_the_check_numbers_are_consecutive_from_one() -> None:
+    # The menu, the README table and enter_check(int(ch) - 1) all assume this.
+    # Renumbering by hand after removing a check is exactly how it drifts.
+    app = App(config_mod.Config())
+    assert [check.key for check in app.checks] == [str(i) for i in range(1, len(app.checks) + 1)]

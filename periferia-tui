@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+# Launch the self check without remembering the venv path.
+#
+# The shebang inside .venv/bin/periferia points at an absolute interpreter path,
+# so it only works from this checkout on this machine. This wrapper finds the
+# interpreter relative to itself and works from anywhere.
+set -euo pipefail
+
+cd "$(dirname "$0")"
+
+if [ -x .venv/bin/periferia ]; then
+    exec .venv/bin/periferia tui "$@"
+fi
+
+# no venv here, try an installed one before giving up
+if command -v periferia >/dev/null 2>&1; then
+    exec periferia tui "$@"
+fi
+
+cat >&2 <<'EOF'
+error: Periferia is not set up in this directory.
+
+  bash scripts/dev-setup.sh
+
+If the project lives somewhere else, run its 'periferia' command directly:
+
+  periferia tui
+EOF
+exit 1

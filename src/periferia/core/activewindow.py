@@ -16,6 +16,7 @@ from __future__ import annotations
 import contextlib
 import json
 import os
+import re
 import subprocess
 import tempfile
 import time
@@ -24,6 +25,13 @@ from dataclasses import dataclass, field
 from .envcheck import FAIL, OK, WARN
 
 MARKER = "IRONINPUT-WINDOW-PROBE"
+
+SCRIPT_NAME = "periferiaProbe"
+
+KWIN_SERVICE = "org.kde.KWin"
+SCRIPTING_PATH = "/Scripting"
+SCRIPTING_IFACE = "org.kde.kwin.Scripting"
+SCRIPT_IFACE = "org.kde.kwin.Script"
 
 SCRIPT = """
 var reported = false;
@@ -154,21 +162,45 @@ def inspect_bus() -> BusReport:
     return BusReport(address, flatpak, has_real, detail)
 
 
-def _gdbus(method: str, argument: str = "") -> subprocess.CompletedProcess[str]:
+def _gdbus(
+    method: str,
+    *arguments: str,
+    path: str = SCRIPTING_PATH,
+    interface: str = SCRIPTING_IFACE,
+    service: str = KWIN_SERVICE,
+) -> subprocess.CompletedProcess[str]:
     args = [
         "gdbus",
         "call",
         "--session",
         "--dest",
-        "org.kde.KWin.Scripting",
+        service,
         "--object-path",
-        "/Scripting",
+        path,
         "--method",
-        f"org.kde.KWin.Scripting.{method}",
+        f"{interface}.{method}",
+        *arguments,
     ]
-    if argument:
-        args.append(argument)
     return _run(args)
+
+
+def bus_names() -> list[str]:
+    out = _run(
+        [
+            "gdbus",
+            "call",
+            "--session",
+            "--dest",
+            "org.freedesktop.DBus",
+            "--object-path",
+            "/org/freedesktop/DBus",
+            "--method",
+            "org.freedesktop.DBus.ListNames",
+        ]
+    )
+    if out.returncode != 0:
+        return []
+    return re.findall(r"'([^']*)'", out.stdout)
 
 
 def _kwin_log(since: str) -> str:
@@ -211,19 +243,13 @@ def probe(timeout: float = 12.0) -> WindowReport:
     try:
         with os.fdopen(handle, "w") as stream:
             stream.write(SCRIPT % {"marker": MARKER})
-        loaded = _gdbus("loadScript", path)
+        loaded = _gdbus("loadScript", path, SCRIPT_NAME)
         if loaded.returncode != 0:
-            message = (loaded.stderr or loaded.stdout).strip().splitlines()
-            reason = message[-1] if message else "loadScript failed"
-            if "not found" in reason or "Unknown" in reason:
-                return WindowReport(
-                    FAIL,
-                    "org.kde.KWin.Scripting is not on the bus",
-                    "this probe only covers KWin; other compositors need a different route",
-                )
-            return WindowReport(FAIL, f"loadScript failed: {reason}")
+            return _explain(loaded)
         script_id = _parse_int(loaded.stdout)
         _gdbus("start")
+        if script_id is not None:
+            _gdbus("run", path=f"{SCRIPTING_PATH}/Script{script_id}", interface=SCRIPT_IFACE)
         time.sleep(1.5)
         report = _parse_marker(_kwin_log(since))
         if report is None:
@@ -264,7 +290,28 @@ def probe(timeout: float = 12.0) -> WindowReport:
 
 def cleanup(script_id: int | None) -> None:
     if script_id is not None:
+        _gdbus("unloadScript", SCRIPT_NAME)
         _gdbus("unloadScript", str(script_id))
+
+
+def _explain(failed: subprocess.CompletedProcess[str]) -> WindowReport:
+    text = (failed.stderr or failed.stdout).strip()
+    reason = text.splitlines()[-1] if text else "loadScript failed"
+    if "ServiceUnknown" in text or "not provided by any" in text:
+        present = [
+            name for name in bus_names() if "kde" in name.lower() or "kwin" in name.lower()
+        ]
+        hint = f"org.kde.KWin is not on the bus; kde names present: {present or 'none'}"
+        return WindowReport(FAIL, "KWin is not reachable on this session bus", hint)
+    if "UnknownObject" in text or "No such object" in text:
+        return WindowReport(
+            FAIL,
+            f"KWin answered but has no scripting object: {reason}",
+            f"check what it offers: gdbus introspect --session --dest {KWIN_SERVICE}",
+        )
+    if "AccessDenied" in text or "not authorized" in text:
+        return WindowReport(FAIL, "KWin refused the call", reason)
+    return WindowReport(FAIL, f"loadScript failed: {reason}")
 
 
 def _parse_int(text: str) -> int | None:

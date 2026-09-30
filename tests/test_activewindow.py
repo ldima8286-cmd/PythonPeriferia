@@ -122,6 +122,57 @@ class TestInspectBus:
         assert report.has_real_socket is False
 
 
+class TestKwinCoordinates:
+    """The D-Bus coordinates, pinned because getting them wrong is silent.
+
+    KWin does not expose a service called org.kde.KWin.Scripting. The scripting
+    interface hangs off the org.kde.KWin service at /Scripting, and the
+    interface itself is spelled with a lower case k. Every wrong combination of
+    those three looks reasonable to type and fails the same way, as a compositor
+    that is not running.
+    """
+
+    def test_service_is_not_the_scripting_name(self) -> None:
+        assert activewindow.KWIN_SERVICE == "org.kde.KWin"
+
+    def test_interface_is_lower_case(self) -> None:
+        assert activewindow.SCRIPTING_IFACE == "org.kde.kwin.Scripting"
+
+    def test_object_path(self) -> None:
+        assert activewindow.SCRIPTING_PATH == "/Scripting"
+
+
+class TestBusNames:
+    def test_parses_gdbus_listing(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        import subprocess
+
+        listing = "(['org.freedesktop.DBus', 'org.kde.KWin', 'org.kde.kwin'],)"
+        monkeypatch.setattr(
+            activewindow,
+            "_run",
+            lambda *a, **k: subprocess.CompletedProcess(
+                args=[], returncode=0, stdout=listing, stderr=""
+            ),
+        )
+        assert activewindow.bus_names() == [
+            "org.freedesktop.DBus",
+            "org.kde.KWin",
+            "org.kde.kwin",
+        ]
+
+    def test_failure_yields_empty(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        import subprocess
+
+        monkeypatch.setattr(
+            activewindow,
+            "_run",
+            lambda *a, **k: subprocess.CompletedProcess(
+                args=[], returncode=1, stdout="", stderr="no bus"
+            ),
+        )
+        assert activewindow.bus_names() == []
+
+
 class TestScript:
     def test_script_is_valid_after_substitution(self) -> None:
         rendered = activewindow.SCRIPT % {"marker": activewindow.MARKER}

@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import pytest
 
-from periferia.core import activewindow, windowbus
+from periferia.core import activewindow, envcheck, windowbus
 
 
 def _line(payload: str) -> str:
@@ -76,6 +76,39 @@ class TestParseInt:
 
     def test_absent(self) -> None:
         assert activewindow._parse_int("nothing") is None
+
+
+class TestSummarize:
+    def _fields(self, **values: str) -> dict:
+        return {name: {"kind": "string", "text": v} for name, v in values.items()}
+
+    def test_resource_class_makes_it_a_match(self) -> None:
+        report = activewindow._summarize(
+            {"fields": self._fields(caption="Steam", resourceClass="steam")}, None
+        )
+        assert report.status == envcheck.OK
+        assert report.matchable() == ["resourceClass"]
+
+    def test_caption_alone_is_not_enough(self) -> None:
+        report = activewindow._summarize({"fields": self._fields(caption="Steam")}, None)
+        assert report.status == envcheck.WARN
+        assert report.matchable() == []
+
+    def test_interesting_skips_empty_fields(self) -> None:
+        report = activewindow._summarize(
+            {
+                "fields": {
+                    "caption": {"kind": "string", "text": "Steam"},
+                    "resourceClass": {"kind": "null"},
+                }
+            },
+            None,
+        )
+        assert report.interesting() == [("caption", "Steam")]
+
+    def test_compositor_error_is_passed_through(self) -> None:
+        report = activewindow._summarize({"error": "no active client"}, None)
+        assert "no active client" in report.detail
 
 
 class TestMatchable:

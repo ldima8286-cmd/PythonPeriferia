@@ -19,7 +19,9 @@ import os
 import re
 import subprocess
 import tempfile
+from collections.abc import Callable
 from dataclasses import dataclass, field
+from typing import Any
 
 from . import windowbus
 from .envcheck import FAIL, OK, WARN
@@ -36,23 +38,46 @@ SCRIPT_IFACE = "org.kde.kwin.Script"
 SCRIPT = """
 var sent = false;
 
-function field(client, name) {
+function read(client, name) {
+    var value;
     try {
-        var value = client[name];
-        if (value === undefined || value === null) {
-            return null;
-        }
-        return "" + value;
+        value = client[name];
     } catch (error) {
-        return null;
+        return {"kind": "unreadable"};
     }
+    if (value === undefined) {
+        return {"kind": "absent"};
+    }
+    if (value === null) {
+        return {"kind": "null"};
+    }
+    var text = null;
+    try {
+        text = "" + value;
+    } catch (error) {
+        try {
+            text = String(value);
+        } catch (other) {
+            text = null;
+        }
+    }
+    return {"kind": typeof value, "text": text};
+}
+
+function describe(client) {
+    var names = [
+        "caption", "resourceClass", "resourceName", "windowRole",
+        "desktopFile", "internalId", "windowClass", "resource_name",
+        "resource_class", "app_id", "wm_class", "surfaceClass"
+    ];
+    var out = {};
+    for (var i = 0; i < names.length; i++) {
+        out[names[i]] = read(client, names[i]);
+    }
+    return out;
 }
 
 function send() {
-    if (sent) {
-        return;
-    }
-    sent = true;
     var client = null;
     try {
         client = workspace.activeClient;
@@ -69,28 +94,21 @@ function send() {
     if (client === null) {
         callDBus(
             "%(bus)s", "%(path)s", "%(iface)s", "Report",
-            JSON.stringify({"error": "no active client"})
+            JSON.stringify({"error": "no active client", "fields": {}})
         );
         return;
     }
-    var data = JSON.stringify({
-        "caption": field(client, "caption"),
-        "resourceClass": field(client, "resourceClass"),
-        "resourceName": field(client, "resourceName"),
-        "windowRole": field(client, "windowRole"),
-        "desktopFile": field(client, "desktopFile"),
-        "internalId": field(client, "internalId")
-    });
-    callDBus("%(bus)s", "%(path)s", "%(iface)s", "Report", data);
+    callDBus(
+        "%(bus)s", "%(path)s", "%(iface)s", "Report",
+        JSON.stringify({"fields": describe(client), "sequence": sent + 1})
+    );
+    sent = sent + 1;
 }
 
 send();
 
 try {
-    workspace.clientActivated.connect(function () {
-        sent = false;
-        send();
-    });
+    workspace.clientActivated.connect(send);
 } catch (error) {
 }
 """
@@ -107,6 +125,7 @@ class WindowReport:
     window_role: str | None = None
     desktop_file: str | None = None
     script_id: int | None = field(default=None)
+    fields: dict[str, Any] = field(default_factory=dict)
 
     def matchable(self) -> list[str]:
         out = []
@@ -118,6 +137,13 @@ class WindowReport:
             out.append("windowRole")
         if self.desktop_file:
             out.append("desktopFile")
+        return out
+
+    def interesting(self) -> list[tuple[str, str]]:
+        out = []
+        for name, entry in self.fields.items():
+            if isinstance(entry, dict) and entry.get("text"):
+                out.append((name, str(entry["text"])))
         return out
 
 
@@ -285,7 +311,56 @@ def _parse_marker(text: str) -> dict | None:
     return None
 
 
-def probe(timeout: float = 12.0) -> WindowReport:
+def _text(report: dict[str, Any], name: str) -> str | None:
+    entry = report.get(name)
+    if isinstance(entry, dict):
+        value = entry.get("text")
+        return str(value) if value else None
+    return str(entry) if entry else None
+
+
+def _summarize(report: dict[str, Any], script_id: int | None) -> WindowReport:
+    if report.get("error"):
+        return WindowReport(
+            WARN,
+            f"KWin reported: {report['error']}",
+            "the compositor is alive but exposed no active client",
+            script_id=script_id,
+        )
+    fields = report.get("fields") or {}
+    caption = _text(fields, "caption")
+    resource_class = _text(fields, "resourceClass")
+    resource_name = _text(fields, "resourceName")
+    status = OK if resource_class or resource_name else WARN
+    detail = (
+        "KWin named the active window"
+        if status == OK
+        else "KWin named the window but sent no field a profile could match on"
+    )
+    hint = ""
+    if status == OK:
+        hint = (
+            "caption changes with the window contents, so it cannot be what a "
+            "profile matches on"
+        )
+    return WindowReport(
+        status,
+        detail,
+        hint,
+        caption=caption,
+        resource_class=resource_class,
+        resource_name=resource_name,
+        window_role=_text(fields, "windowRole"),
+        desktop_file=_text(fields, "desktopFile"),
+        script_id=script_id,
+        fields=fields,
+    )
+
+
+def probe(
+    timeout: float = 12.0,
+    on_report: Callable[[WindowReport], None] | None = None,
+) -> WindowReport:
     bus = inspect_bus()
     if bus.is_flatpak_proxy and not bus.has_real_socket:
         return WindowReport(
@@ -343,32 +418,16 @@ def probe(timeout: float = 12.0) -> WindowReport:
                 "\n".join(diagnose(since)),
                 script_id=script_id,
             )
-        if report.get("error"):
-            return WindowReport(
-                WARN,
-                f"KWin reported: {report['error']}",
-                "the compositor is alive but exposed no active client",
-                script_id=script_id,
-            )
-        status = OK
-        detail = "KWin named the active window"
-        if not any(report.get(key) for key in ("resourceClass", "resourceName")):
-            status = WARN
-            detail = "KWin named the window but exposed no stable identifier"
-        return WindowReport(
-            status,
-            detail,
-            "caption changes with the window contents, so it cannot be what a "
-            "profile matches on"
-            if status == OK
-            else "",
-            caption=report.get("caption"),
-            resource_class=report.get("resourceClass"),
-            resource_name=report.get("resourceName"),
-            window_role=report.get("windowRole"),
-            desktop_file=report.get("desktopFile"),
-            script_id=script_id,
-        )
+        first = _summarize(report, script_id)
+        if on_report is not None:
+            on_report(first)
+            while True:
+                with contextlib.suppress(KeyboardInterrupt):
+                    later = service.next_report(timeout=3600.0)
+                    if later is None:
+                        break
+                    on_report(_summarize(later, script_id))
+        return first
     finally:
         with contextlib.suppress(OSError):
             os.unlink(path)

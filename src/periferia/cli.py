@@ -140,7 +140,16 @@ def cmd_probe_window(args: argparse.Namespace) -> int:
         print(f"  a real socket exists at {os.environ.get('XDG_RUNTIME_DIR')}/bus")
 
     print(f"\n{BOLD}active window{RESET}")
-    report = activewindow.probe(timeout=args.timeout)
+    def show(later: activewindow.WindowReport) -> None:
+        print(f"  {DIM}->{RESET}")
+        for name, value in later.interesting():
+            print(f"  {name:16} {value}")
+        if not later.interesting():
+            print(f"  {DIM}(nothing usable){RESET}")
+
+    report = activewindow.probe(
+        timeout=args.timeout, on_report=show if args.watch else None
+    )
     if report.status == envcheck.OK:
         print(f"  {_c('found', BOLD + GREEN)}: {report.detail}")
     elif report.status == envcheck.WARN:
@@ -151,22 +160,28 @@ def cmd_probe_window(args: argparse.Namespace) -> int:
         for line in report.hint.splitlines():
             print(f"  {DIM}{line}{RESET}")
 
-    if report.caption or report.resource_class or report.resource_name:
-        print(f"\n{BOLD}what the compositor would see{RESET}")
-        for label, value in (
-            ("caption", report.caption),
-            ("resourceClass", report.resource_class),
-            ("resourceName", report.resource_name),
-            ("windowRole", report.window_role),
-            ("desktopFile", report.desktop_file),
-        ):
-            if value:
-                print(f"  {label:14} {value}")
-        matchable = report.matchable()
-        if matchable:
-            print(f"\n  a profile could match on: {_c(', '.join(matchable), GREEN)}")
-        else:
-            print(f"\n  {YELLOW}no stable field to match a profile on{RESET}")
+    if report.interesting():
+        print(f"\n{BOLD}what the compositor sent{RESET}")
+        for name, value in report.interesting():
+            print(f"  {name:16} {value}")
+    if report.fields:
+        silent = [
+            name
+            for name, entry in report.fields.items()
+            if not (isinstance(entry, dict) and entry.get("text"))
+        ]
+        if silent:
+            print(f"\n  {DIM}nothing for: {', '.join(silent)}{RESET}")
+    matchable = report.matchable()
+    if matchable:
+        print(f"\n  a profile could match on: {_c(', '.join(matchable), GREEN)}")
+    elif report.fields:
+        print(f"\n  {YELLOW}no field a profile could match on{RESET}")
+    if args.watch:
+        print(f"\n  {DIM}watching, switch windows, Ctrl-C to stop{RESET}")
+        with contextlib.suppress(KeyboardInterrupt):
+            while True:
+                time.sleep(1)
     activewindow.cleanup(report.script_id)
     return 0 if report.status == envcheck.OK else 1
 
@@ -507,6 +522,11 @@ def build_parser() -> argparse.ArgumentParser:
         type=float,
         default=12.0,
         help="how long to wait for the compositor to answer, default 12",
+    )
+    probe.add_argument(
+        "--watch",
+        action="store_true",
+        help="keep listening and print every window as it takes focus",
     )
     probe.set_defaults(func=cmd_probe_window)
     sub.add_parser("teardown", help="unload leftover echo-cancel modules").set_defaults(

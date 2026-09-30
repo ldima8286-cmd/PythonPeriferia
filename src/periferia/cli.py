@@ -148,7 +148,8 @@ def cmd_probe_window(args: argparse.Namespace) -> int:
     else:
         print(f"  {_c('no', BOLD + YELLOW)}: {report.detail}")
     if report.hint:
-        print(f"  {DIM}{report.hint}{RESET}")
+        for line in report.hint.splitlines():
+            print(f"  {DIM}{line}{RESET}")
 
     if report.caption or report.resource_class or report.resource_name:
         print(f"\n{BOLD}what the compositor would see{RESET}")

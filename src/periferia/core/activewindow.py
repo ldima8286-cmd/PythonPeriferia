@@ -211,6 +211,67 @@ def _kwin_log(since: str) -> str:
     return out.stdout or ""
 
 
+def _journal_sources(since: str) -> list[tuple[str, str]]:
+    sources = [
+        (
+            "user journal",
+            _run(
+                ["journalctl", "--user", "--since", since, "--no-pager", "-o", "cat"],
+                timeout=15.0,
+            ).stdout
+            or "",
+        ),
+        (
+            "kwin tag",
+            _run(
+                ["journalctl", "--since", since, "--no-pager", "-o", "cat", "-t", "kwin"],
+                timeout=15.0,
+            ).stdout
+            or "",
+        ),
+        (
+            "kwin_wayland process",
+            _run(
+                [
+                    "journalctl",
+                    "--since",
+                    since,
+                    "--no-pager",
+                    "-o",
+                    "cat",
+                    "_COMM=kwin_wayland",
+                ],
+                timeout=15.0,
+            ).stdout
+            or "",
+        ),
+    ]
+    return sources
+
+
+def diagnose(since: str) -> list[str]:
+    lines: list[str] = []
+    loaded = _gdbus("isScriptLoaded", SCRIPT_NAME)
+    if loaded.returncode == 0:
+        verdict = "yes" if "true" in loaded.stdout.lower() else "no"
+        lines.append(f"isScriptLoaded({SCRIPT_NAME}) -> {verdict}")
+    else:
+        text = (loaded.stderr or loaded.stdout).strip()
+        lines.append(f"isScriptLoaded failed: {text.splitlines()[-1] if text else '?'}")
+
+    for label, text in _journal_sources(since):
+        if MARKER in text:
+            lines.append(f"{label}: contains the marker")
+            continue
+        kwin_lines = [row for row in text.splitlines() if "kwin" in row.lower()]
+        if kwin_lines:
+            tail = kwin_lines[-1].strip()[:90]
+            lines.append(f"{label}: {len(kwin_lines)} kwin lines, no marker, last: {tail}")
+        else:
+            lines.append(f"{label}: no kwin output at all")
+    return lines
+
+
 def _parse_marker(text: str) -> dict | None:
     for line in text.splitlines():
         index = line.find(MARKER)
@@ -253,10 +314,11 @@ def probe(timeout: float = 12.0) -> WindowReport:
         time.sleep(1.5)
         report = _parse_marker(_kwin_log(since))
         if report is None:
+            found = "\n".join(diagnose(since))
             return WindowReport(
                 WARN,
-                "KWin ran the script but its log line could not be read",
-                "try: journalctl --user -o cat --since '-1 min' | grep " + MARKER,
+                "KWin took the script but its output was not found",
+                found,
                 script_id=script_id,
             )
         if report.get("error"):

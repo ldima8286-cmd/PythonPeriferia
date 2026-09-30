@@ -59,9 +59,19 @@ def pick_physical_source(preferred: str = "auto") -> str | None:
 class VirtualMic:
     """Binds a volume gate to a source someone else created."""
 
-    def __init__(self, cfg: AudioConfig, *, slider: Slider | None = None) -> None:
+    def __init__(
+        self,
+        cfg: AudioConfig,
+        *,
+        slider: Slider | None = None,
+        rebuild: Callable[[], str | None] | None = None,
+    ) -> None:
         self.cfg = cfg
         self._slider = slider or pipewire.set_volume
+        # Rebuilds the chain that owns the source, for when the source itself
+        # is gone. The gate only ever holds a name, so if the node behind that
+        # name disappears there is nothing left for it to move.
+        self._rebuild = rebuild
         self._lock = threading.RLock()
         self._source: str | None = None
         self._physical: str | None = None
@@ -133,15 +143,24 @@ class VirtualMic:
                 return
 
     def _reresolve(self) -> bool:
-        """Look the source up again, and adopt the name it has now.
+        """Get a source that still exists, one way or another.
 
         The description in the config is the only handle that outlives a
-        reload. Everything else is a name PipeWire generated for itself.
+        reload, so ask for it first. If nothing carries that description then
+        the node is genuinely gone, and the owner of the chain has to build it
+        again. Reporting the same refusal on every key press helps nobody.
         """
         found = pipewire.find_source(self.cfg.virtual_name)
         if found and found != self._source:
             log.info("source is now %s, was %s", found, self._source)
             self._source = found
+            return True
+        if found or self._rebuild is None:
+            return False
+        rebuilt = self._rebuild()
+        if rebuilt and rebuilt != self._source:
+            log.info("rebuilt the source as %s, was %s", rebuilt, self._source)
+            self._source = rebuilt
             return True
         return False
 

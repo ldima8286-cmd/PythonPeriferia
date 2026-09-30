@@ -136,3 +136,58 @@ class TestStaleSourceName:
                 mic._apply(1.0)
 
         assert not [r for r in caplog.records if r.levelno == logging.WARNING]
+
+
+class TestRebuildingAGoneSource:
+    """When nothing carries the description any more, the node is gone. Retrying
+    the dead name forever is what filled the journal; the owner of the chain has
+    to build it again."""
+
+    @staticmethod
+    def _gone(name: str, fraction: float) -> None:
+        raise pipewire_mod.PipeWireError("Нет такого объекта")
+
+    def test_it_asks_for_a_rebuild_when_the_name_is_unknown(self, monkeypatch):
+        asked: list[str] = []
+        monkeypatch.setattr(pipewire_mod, "find_source", lambda d: None)
+        mic = VirtualMic(
+            AudioConfig(),
+            slider=self._gone,
+            rebuild=lambda: (asked.append("yes"), "echo-cancel-source-new")[1],
+        )
+        mic.attach("echo-cancel-source")
+        seen: list[tuple[str, float]] = []
+        mic._slider = lambda n, v: seen.append((n, v))
+
+        mic._held = True
+        mic._apply(1.0)
+
+        assert asked == ["yes"]
+        assert seen == [("echo-cancel-source-new", 1.0)]
+        assert mic.source == "echo-cancel-source-new"
+
+    def test_without_a_rebuild_it_reports_and_stops(self, monkeypatch, caplog):
+        import logging
+
+        monkeypatch.setattr(pipewire_mod, "find_source", lambda d: None)
+        mic = VirtualMic(AudioConfig(), slider=self._gone)
+        mic.attach("echo-cancel-source")
+        mic._held = True
+
+        with caplog.at_level(logging.WARNING):
+            mic._apply(1.0)
+
+        assert len([r for r in caplog.records if r.levelno == logging.WARNING]) == 1
+
+    def test_a_failed_rebuild_does_not_raise(self, monkeypatch, caplog):
+        import logging
+
+        monkeypatch.setattr(pipewire_mod, "find_source", lambda d: None)
+        mic = VirtualMic(AudioConfig(), slider=self._gone, rebuild=lambda: None)
+        mic.attach("echo-cancel-source")
+        mic._held = True
+
+        with caplog.at_level(logging.WARNING):
+            mic._apply(1.0)  # must not raise
+
+        assert len([r for r in caplog.records if r.levelno == logging.WARNING]) == 1

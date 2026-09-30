@@ -32,8 +32,12 @@ log = logging.getLogger(__name__)
 class Daemon:
     def __init__(self, cfg: config_mod.Config) -> None:
         self.cfg = cfg
-        self.mic = VirtualMic(cfg.audio)
+        self.mic = VirtualMic(cfg.audio, rebuild=self._rebuild_source)
         self.processing = MicProcessing(cfg.processing)
+        # Rebuilding drops the node applications are pointed at, so it is not
+        # done on every key press. A burst of presses with the source missing
+        # gets one rebuild, not one per press.
+        self._rebuilt_at: float = 0.0
         self._release_at: float | None = None
         self._pressed_at: float | None = None
         # True when the mic is held open by a latch and the key is no longer
@@ -62,6 +66,31 @@ class Daemon:
         """
         with self._events_lock:
             return [t for t, n in reversed(self._events) if n == name and t >= since]
+
+    def _rebuild_source(self) -> str | None:
+        """Load the echo-cancel module again and hand back the new source name.
+
+        Called by the gate when the name it holds stops resolving. The node
+        behind the name is gone at that point, and no amount of retrying the
+        old name will bring it back, so the chain is put up again from
+        scratch. Rate limited: a key held down produces a press per repeat.
+        """
+        if time.monotonic() - self._rebuilt_at < 5.0:
+            return None
+        self._rebuilt_at = time.monotonic()
+
+        physical = self.mic.pick_physical()
+        if not physical:
+            log.error("no capture device to rebuild the source from")
+            return None
+        log.warning("%s is gone, loading it again", self.mic.source)
+        self.processing.stop()
+        virtual = self.processing.start(physical, name=self.cfg.audio.virtual_name)
+        if not virtual:
+            log.error("could not load the source again, PTT is not working")
+            return None
+        log.info("source rebuilt as %s", virtual)
+        return virtual
 
     def setup(self) -> bool:
         if not self.cfg.audio.enabled:

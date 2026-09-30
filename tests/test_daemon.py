@@ -448,3 +448,48 @@ def _daemon_for(monkeypatch):
     from src.periferia.core.daemon import Daemon
 
     return Daemon(config_mod.Config(audio=config_mod.AudioConfig(enabled=True)))
+
+
+class TestRebuildRateLimit:
+    """A held key repeats, and each repeat rebuilds the node applications are
+    pointed at. One rebuild per burst, not one per press."""
+
+    def _daemon(self):
+        from src.periferia.core.daemon import Daemon
+
+        return Daemon(config_mod.Config())
+
+    def test_the_first_rebuild_is_allowed(self, monkeypatch):
+        d = self._daemon()
+        monkeypatch.setattr(d.mic, "pick_physical", lambda: "hw:0,0")
+        started: list[str] = []
+        monkeypatch.setattr(d.processing, "start", lambda p, name: started.append(name) or "new")
+        monkeypatch.setattr(d.processing, "stop", lambda: None)
+        d._rebuilt_at = 0.0
+        assert d._rebuild_source() == "new"
+        assert started == ["PeriferiaMic"]
+
+    def test_a_second_one_within_the_cooldown_is_skipped(self, monkeypatch):
+        d = self._daemon()
+        monkeypatch.setattr(d.mic, "pick_physical", lambda: "hw:0,0")
+        calls: list[str] = []
+        monkeypatch.setattr(d.processing, "start", lambda p, name: calls.append(name) or "new")
+        monkeypatch.setattr(d.processing, "stop", lambda: None)
+        d._rebuilt_at = time.monotonic()
+        assert d._rebuild_source() is None
+        assert calls == []
+
+    def test_it_works_again_once_the_cooldown_passes(self, monkeypatch):
+        d = self._daemon()
+        monkeypatch.setattr(d.mic, "pick_physical", lambda: "hw:0,0")
+        monkeypatch.setattr(d.processing, "start", lambda p, name: "new")
+        monkeypatch.setattr(d.processing, "stop", lambda: None)
+        d._rebuilt_at = time.monotonic() - 60
+        assert d._rebuild_source() == "new"
+
+    def test_no_capture_device_means_no_rebuild(self, monkeypatch, caplog):
+        d = self._daemon()
+        monkeypatch.setattr(d.mic, "pick_physical", lambda: None)
+        monkeypatch.setattr(d.processing, "start", lambda p, name: "should not happen")
+        d._rebuilt_at = 0.0
+        assert d._rebuild_source() is None

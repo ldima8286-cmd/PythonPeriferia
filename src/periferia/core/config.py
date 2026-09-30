@@ -47,8 +47,10 @@ class PttConfig:
 
     ignore_repeat: bool = True
 
-    # Close the mic when the session locks. Without it, walking away while
-    # holding the key leaves the mic open in an empty room.
+    # Hold the key at least this long to latch the microphone open, in ms.
+    # While latched, releasing the key does not close it: the next press does.
+    # For the times you need both hands free. 0 disables latching.
+    latch_ms: int = 0
 
     # Cut off a key that has been held this long, in ms. 0 disables it.
     # A last resort against a press that never gets a release.

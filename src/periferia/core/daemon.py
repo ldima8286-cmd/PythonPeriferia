@@ -31,6 +31,10 @@ class Daemon:
         self.processing = MicProcessing(cfg.processing)
         self._release_at: float | None = None
         self._pressed_at: float | None = None
+        # True when the mic is held open by a latch and the key is no longer
+        # down. max_press_ms must not fire in that state, or it would cut off
+        # a mic nobody is holding down.
+        self._latched = False
         self._stop = threading.Event()
         self._listener: HotkeyListener | None = None
         # Timestamps of the last few state changes, so a caller can tell what
@@ -135,6 +139,16 @@ class Daemon:
         return True
 
     def on_press(self) -> None:
+        if self._latched:
+            # A latched mic is toggled by the next press, not by the release.
+            # Holding the key again would otherwise open a second one.
+            log.info("ptt down -> unlatched")
+            self._release_at = None
+            self._latched = False
+            self._record("unlatch")
+            self.mic.force_silence()
+            state_mod.write(state_mod.CLOSED, source=self.mic.source)
+            return
         log.info("ptt down -> mic open")
         self._release_at = None
         self._pressed_at = self._record("press")
@@ -142,6 +156,10 @@ class Daemon:
         state_mod.write(state_mod.OPEN, source=self.mic.source)
 
     def on_release(self) -> None:
+        if self._latched:
+            return  # latched: the key going up is the whole point
+        if self._latch_now():
+            return
         # logging this too: with only the press side visible, a listener that
         # never saw anything was indistinguishable from a key that was never
         # pressed, and that cost a long hunt
@@ -157,6 +175,9 @@ class Daemon:
         log.warning("panic pressed")
         self._record("panic")
         self._release_at = None
+        # Panic has to drop the latch too. Left set, the next press would be
+        # read as an unlatch and the microphone would never open again.
+        self._latched = False
         self.mic.panic()
         state_mod.write(state_mod.PANIC, source=self.mic.source)
         # Stamp the real end of the panic, not a level the TUI polls later.
@@ -171,14 +192,32 @@ class Daemon:
         session locks. Clearing the state here is what stops the next press
         from being swallowed as a duplicate.
         """
-        if self._release_at is None and self._pressed_at is None:
+        if self._release_at is None and self._pressed_at is None and not self._latched:
             return
+        # A latched mic has neither a key down nor a scheduled close, so the
+        # usual check would return here and leave it transmitting for good.
         log.info("forcing the microphone closed: %s", why)
         self._release_at = None
+        self._latched = False
         if self._listener is not None:
             self._listener.reset_state()
         self.mic.force_silence()
         state_mod.write(state_mod.CLOSED, source=self.mic.source)
+
+    def _latch_now(self) -> bool:
+        """Latch the mic open if the key was held long enough to ask for it."""
+        threshold = self.cfg.ptt.latch_ms
+        if threshold <= 0 or self._pressed_at is None:
+            return False
+        held_ms = (time.monotonic() - self._pressed_at) * 1000.0
+        if held_ms < threshold:
+            return False
+        log.info("held for %d ms -> latched open, press ptt again to close", int(held_ms))
+        self._latched = True
+        self._pressed_at = None
+        self._record("latch")
+        state_mod.write(state_mod.LATCHED, source=self.mic.source)
+        return True
 
     def _expire_stuck_hold(self) -> None:
         """Last resort if a press never gets a matching release.
@@ -187,7 +226,7 @@ class Daemon:
         leave the key logically down. The design assumes the mic must not stay
         open indefinitely, so a long hold is cut off.
         """
-        if self._pressed_at is None:
+        if self._pressed_at is None or self._latched:
             return
         limit = self.cfg.ptt.max_press_ms
         if limit <= 0:

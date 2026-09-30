@@ -39,6 +39,13 @@ ptt:
   # Instant mute, ignoring hold_ms. Set to "" to disable.
   panic_key: KEY_F12
 
+  # Hold the key at least this long to latch the microphone open, in ms. The
+  # next press closes it again, and releasing does nothing. For the times you
+  # need both hands free. 0 disables it, which is the default: a latch you
+  # cannot hear the state of is a latch you will switch off and forget.
+  # Check it with:  periferia status
+  latch_ms: 0
+
   # Which keyboards to watch. "auto" watches every keyboard it can open, which
   # is what you want when you have a laptop keyboard plus an external one, so
   # the key works on both. To restrict it, give one node, or several comma

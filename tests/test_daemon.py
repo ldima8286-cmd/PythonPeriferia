@@ -11,6 +11,7 @@ level never moves, no matter what key is pressed.
 from __future__ import annotations
 
 import importlib
+import time
 from typing import Any
 
 import pytest
@@ -29,6 +30,10 @@ class _Listener:
         self.polls = 0
         self.opened = False
         self.closed = False
+        self.reset = 0
+
+    def reset_state(self) -> None:
+        self.reset += 1
 
     def open(self) -> None:
         if self.fails:
@@ -197,3 +202,124 @@ def test_the_hold_running_out_is_what_closes_the_mic(
     daemon._expire_hold()
     note = state_mod.read()
     assert note is not None and note["state"] == state_mod.CLOSED
+
+
+def _latched_daemon(tmp_path: object, monkeypatch: pytest.MonkeyPatch) -> Daemon:
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path))
+    daemon = _daemon(_Listener())
+    daemon.cfg.ptt.latch_ms = 300
+    daemon._pressed_at = 0.0
+    return daemon
+
+
+def test_latching_is_off_by_default(monkeypatch: pytest.MonkeyPatch, tmp_path: object) -> None:
+    # Nobody asked for a latch they cannot see, so it has to be asked for.
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path))
+    daemon = _daemon(_Listener())
+    daemon._pressed_at = 0.0
+    daemon.on_release()
+    assert daemon._latched is False
+
+
+def test_a_long_hold_latches_instead_of_closing(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: object
+) -> None:
+    daemon = _latched_daemon(tmp_path, monkeypatch)
+    daemon.on_press()
+    daemon._pressed_at = 0.0
+    daemon.on_release()
+
+    assert daemon._latched
+    note = state_mod.read()
+    assert note is not None and note["state"] == state_mod.LATCHED
+    # no release was scheduled, so nothing will close it behind the user's back
+    assert daemon._release_at is None
+
+
+def test_a_short_tap_closes_normally(monkeypatch: pytest.MonkeyPatch, tmp_path: object) -> None:
+    daemon = _latched_daemon(tmp_path, monkeypatch)
+    daemon.on_press()
+    # the threshold is 300 ms and this press lasted about none of it
+    daemon._pressed_at = time.monotonic()
+    daemon.on_release()
+
+    assert daemon._latched is False
+    assert daemon._release_at is not None
+
+
+def test_the_next_press_closes_a_latched_mic(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: object
+) -> None:
+    daemon = _latched_daemon(tmp_path, monkeypatch)
+    daemon.on_press()
+    daemon._pressed_at = 0.0
+    daemon.on_release()
+    assert daemon._latched
+
+    daemon.on_press()
+    assert daemon._latched is False
+    note = state_mod.read()
+    assert note is not None and note["state"] == state_mod.CLOSED
+
+
+def test_releasing_a_latched_key_does_nothing(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: object
+) -> None:
+    # The key comes up after latching all the time. Treating that as a release
+    # would close the mic a few milliseconds after the user asked to keep it.
+    daemon = _latched_daemon(tmp_path, monkeypatch)
+    daemon.on_press()
+    daemon._pressed_at = 0.0
+    daemon.on_release()
+    daemon.on_release()
+    daemon.on_release()
+
+    assert daemon._latched
+    note = state_mod.read()
+    assert note is not None and note["state"] == state_mod.LATCHED
+
+
+def test_max_press_does_not_cut_off_a_latched_mic(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: object
+) -> None:
+    # The stuck-hold guard exists for a key that never comes up. A latched mic
+    # has no key down at all, so that guard would close it for no reason.
+    daemon = _latched_daemon(tmp_path, monkeypatch)
+    daemon.on_press()
+    daemon._pressed_at = 0.0
+    daemon.on_release()
+    assert daemon._latched
+
+    daemon.cfg.ptt.max_press_ms = 1
+    daemon._expire_stuck_hold()
+    assert daemon._latched
+
+
+def test_panic_still_closes_a_latched_mic(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: object
+) -> None:
+    daemon = _latched_daemon(tmp_path, monkeypatch)
+    daemon.on_press()
+    daemon._pressed_at = 0.0
+    daemon.on_release()
+    assert daemon._latched
+
+    daemon.on_panic()
+    assert daemon._latched is False
+    note = state_mod.read()
+    assert note is not None and note["state"] == state_mod.PANIC
+
+
+def test_forcing_a_release_also_unlatches(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: object
+) -> None:
+    # Otherwise the next press after any forced close would be swallowed as an
+    # unlatch and the key would look dead until pressed twice.
+    daemon = _latched_daemon(tmp_path, monkeypatch)
+    daemon.on_press()
+    daemon._pressed_at = 0.0
+    daemon.on_release()
+    assert daemon._latched
+
+    daemon.force_release("test")
+    assert daemon._latched is False

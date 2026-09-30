@@ -138,7 +138,11 @@ will be able to see the audio. If key events are not readable, see
 periferia-daemon          # installed by scripts/dev-setup.sh
 ```
 
-Hold the key: mic opens. Release: mic closes after `hold_ms`. The daemon only
+Hold the key: mic opens. Release: mic closes after `hold_ms`. Hold it longer
+than `latch_ms` and the mic latches open instead, closed by the next press, for
+when you need both hands free. Latching is off by default; `periferia status`
+shows the state, because a latch you cannot hear is a latch you forget you
+turned on. The daemon only
 reads the keyboard, it never grabs it, so your typing keeps working normally.
 
 | command | what it does |
@@ -168,6 +172,7 @@ reads the keyboard, it never grabs it, so your typing keeps working normally.
 | `ptt.ptt_key` | auto | physical key, see below |
 | `ptt.device` | auto | which keyboards to watch, see below |
 | `ptt.panic_key` | KEY_F12 | instant mute, ignores `hold_ms` |
+| `ptt.latch_ms` | 0 | hold this long to latch the mic open, 0 disables |
 | `ptt.max_press_ms` | 300000 | cut off a key held longer than this, 0 disables |
 | `processing.voice_detect` | true | cuts silence between phrases, turn it off if quiet words get lost |
 
@@ -305,9 +310,13 @@ reports on this.
 - [ ] tray icon and overlay indicator, reading the state file `periferia status` uses
 - [ ] stereo to mono, if it turns out the two channels really differ
 - [ ] GUI for the config
-- [ ] input profiles: remap, DPI, disable keys, per-window switching
-- [ ] RGB control with scripts and time-of-day profiles
-- [ ] compressor and de-esser via LADSPAF
+- [ ] input profiles: remap, DPI, disable keys, per-window switching. Needs
+      `/dev/uinput`, which this machine does not have, and active window
+      detection on Wayland
+- [ ] RGB control with scripts and time-of-day profiles. Needs raw HID access,
+      which this machine does not expose
+- [ ] compressor and de-esser. Blocked: this PipeWire has no `module-lv2`, no
+      `module-filter-chain` and no LADSPAF host, so there is nowhere to put one
 - [ ] direct PipeWire graph control, instead of going through pactl
 - [ ] Flatpak packaging, AUR
 

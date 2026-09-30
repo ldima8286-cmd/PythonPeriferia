@@ -222,6 +222,9 @@ def cmd_status(args: argparse.Namespace) -> int:
 
     if now == state_mod.OPEN:
         colour, word = GREEN, "OPEN"
+    elif now == state_mod.LATCHED:
+        # Latched is the one state nobody can hear, so it has to be readable.
+        colour, word = CYAN, "LATCHED, press ptt to close"
     elif now == state_mod.CLOSING:
         colour, word = YELLOW, "closing"
     elif now == state_mod.PANIC:

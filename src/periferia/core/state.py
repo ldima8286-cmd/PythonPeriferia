@@ -27,6 +27,7 @@ log = logging.getLogger(__name__)
 CLOSED = "closed"
 OPEN = "open"
 CLOSING = "closing"
+LATCHED = "latched"
 PANIC = "panic"
 
 

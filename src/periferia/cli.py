@@ -196,7 +196,6 @@ def cmd_probe_window(args: argparse.Namespace) -> int:
                         f" focus{RESET}",
                         flush=True,
                     )
-    activewindow.cleanup(report.script_id)
     return 0 if report.status == envcheck.OK else 1
 
 

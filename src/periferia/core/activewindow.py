@@ -115,6 +115,7 @@ class WindowReport:
     desktop_file: str | None = None
     script_id: int | None = field(default=None)
     fields: dict[str, Any] = field(default_factory=dict)
+    script_name: str = ""
 
     def matchable(self) -> list[str]:
         out = []
@@ -293,12 +294,12 @@ def _journal_sources(since: str) -> list[tuple[str, str]]:
     return sources
 
 
-def diagnose(since: str) -> list[str]:
+def diagnose(since: str, name: str = SCRIPT_NAME) -> list[str]:
     lines: list[str] = []
-    loaded = _gdbus("isScriptLoaded", SCRIPT_NAME)
+    loaded = _gdbus("isScriptLoaded", name)
     if loaded.returncode == 0:
         verdict = "yes" if "true" in loaded.stdout.lower() else "no"
-        lines.append(f"isScriptLoaded({SCRIPT_NAME}) -> {verdict}")
+        lines.append(f"isScriptLoaded({name}) -> {verdict}")
     else:
         text = (loaded.stderr or loaded.stdout).strip()
         lines.append(f"isScriptLoaded failed: {text.splitlines()[-1] if text else '?'}")
@@ -435,6 +436,7 @@ def probe(
 
     since = f"-{int(timeout) + 5} seconds"
     service = windowbus.WindowService()
+    name = f"{SCRIPT_NAME}{os.getpid()}"
     handle, path = tempfile.mkstemp(prefix="periferia-kwin-probe-", suffix=".js")
     try:
         if not service.start():
@@ -453,11 +455,31 @@ def probe(
                     "iface": windowbus.INTERFACE,
                 }
             )
-        loaded = _gdbus("loadScript", path, SCRIPT_NAME)
+        _gdbus("unloadScript", name)
+        loaded = _gdbus("loadScript", path, name)
         if loaded.returncode != 0:
             return _explain(loaded)
         script_id = _parse_int(loaded.stdout)
         steps = [("loadScript", loaded)]
+        if script_id is not None and script_id < 0:
+            held = _gdbus("isScriptLoaded", name)
+            return WindowReport(
+                FAIL,
+                f"KWin refused the script and gave id {script_id}",
+                "\n".join(
+                    [
+                        f"loadScript said {loaded.stdout.strip()}, which is how it"
+                        f" says no",
+                        f"isScriptLoaded({name}) -> "
+                        f"{'yes' if held.returncode == 0 else 'no'}",
+                        "a name that is already taken is the usual reason, and an"
+                        " earlier run that exited early can leave one behind",
+                        "run: qdbus6 org.kde.KWin /Scripting"
+                        f" org.kde.kwin.Scripting.unloadScript {SCRIPT_NAME}",
+                    ]
+                ),
+                script_name=name,
+            )
         started = _gdbus("start")
         steps.append(("start", started))
         if started.returncode != 0:
@@ -482,7 +504,7 @@ def probe(
                             "its hello arrived, so the script and the bus are fine; "
                             "reading the window is what fails",
                             *_step_codes(steps),
-                            *diagnose(since),
+                            *diagnose(since, name),
                         ]
                     ),
                     script_id=script_id,
@@ -495,7 +517,7 @@ def probe(
                         "the script did not report, not even its own hello, so it "
                         "either failed to run or callDBus is not reaching us",
                         *_step_codes(steps),
-                        *diagnose(since),
+                        *diagnose(since, name),
                     ]
                 ),
                 script_id=script_id,
@@ -510,15 +532,16 @@ def probe(
                     on_report(_summarize(later, script_id))
         return first
     finally:
+        _gdbus("unloadScript", name)
         with contextlib.suppress(OSError):
             os.unlink(path)
         service.stop()
 
 
-def cleanup(script_id: int | None) -> None:
-    if script_id is not None:
-        _gdbus("unloadScript", SCRIPT_NAME)
-        _gdbus("unloadScript", str(script_id))
+def cleanup(script_id: int | None, script_name: str = SCRIPT_NAME) -> None:
+    """Left for anything that loaded a script outside probe."""
+    if script_id is not None or script_name:
+        _gdbus("unloadScript", script_name or SCRIPT_NAME)
 
 
 def _explain(

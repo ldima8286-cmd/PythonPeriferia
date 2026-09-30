@@ -8,6 +8,7 @@ line with other text around it, and a parser that is too strict here reports
 
 from __future__ import annotations
 
+import pathlib
 import subprocess
 
 import pytest
@@ -203,6 +204,28 @@ class TestStepCodes:
     def test_a_failing_step_shows_the_complaint(self) -> None:
         line = activewindow._step_codes([("run", self._run(1, "no such object\n"))])
         assert line == ["run (exit 1): no such object"]
+
+
+class TestScriptNameIsNotShared:
+    def test_each_run_gets_its_own_name(self) -> None:
+        import os
+
+        assert activewindow.SCRIPT_NAME.isidentifier()
+        assert f"{activewindow.SCRIPT_NAME}{os.getpid()}".startswith(
+            activewindow.SCRIPT_NAME
+        )
+
+    def test_a_leftover_cannot_block_the_next_run(self) -> None:
+        source = pathlib.Path(activewindow.__file__).read_text()
+        assert 'f"{SCRIPT_NAME}{os.getpid()}"' in source
+        unload_after_load = source.index('loaded = _gdbus("loadScript"')
+        assert source.rindex('_gdbus("unloadScript", name)') > unload_after_load
+
+    def test_the_script_is_unloaded_even_on_an_early_exit(self) -> None:
+        source = pathlib.Path(activewindow.__file__).read_text()
+        body = source[source.index("def probe(") : source.index("def cleanup(")]
+        finally_block = body[body.index("finally:") :]
+        assert '_gdbus("unloadScript", name)' in finally_block
 
 
 class TestExplain:

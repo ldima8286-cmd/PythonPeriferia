@@ -13,6 +13,7 @@ import json
 import logging
 import shutil
 import subprocess
+import time
 from collections.abc import Sequence
 from typing import Any
 
@@ -99,6 +100,44 @@ def get_source(name: str) -> dict[str, Any] | None:
 
 def source_exists(name: str) -> bool:
     return get_source(name) is not None
+
+
+def server_ready() -> bool:
+    """Whether the sound server will answer at all.
+
+    Only distinguishes "up" from "not up". A source the server does not know
+    is a different question, and one that a login-time race does not explain.
+    """
+    try:
+        sources()
+    except PipeWireError:
+        return False
+    return True
+
+
+def wait_for_server(timeout: float = 30.0, interval: float = 0.5) -> bool:
+    """Block until the sound server answers, or the timeout runs out.
+
+    User services and the graphical session start in parallel, so the daemon
+    can win the race and find no server listening yet. Exiting there is the
+    wrong answer: systemd's restart limit is five tries a minute, and a service
+    that dies on the first attempt can leave the microphone dead for the rest
+    of the session with nothing in the log but a refused connection.
+    """
+    if server_ready():
+        return True
+    deadline = time.monotonic() + timeout
+    announced = False
+    while time.monotonic() < deadline:
+        time.sleep(interval)
+        if server_ready():
+            if announced:
+                log.info("the sound server is up")
+            return True
+        if not announced:
+            log.info("waiting up to %.0fs for the sound server", timeout)
+            announced = True
+    return False
 
 
 def is_virtual(name: str) -> bool:

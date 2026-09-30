@@ -395,3 +395,56 @@ class _Stub:
 
 def _should_not_start(cfg: object) -> _Stub:
     raise AssertionError("the daemon must not start on an unreadable config")
+
+
+class TestWaitingForTheSoundServer:
+    """The daemon used to lose the race against the session's PipeWire and die
+    with a refused connection. With StartLimitBurst=5 that can leave the
+    microphone dead for the whole session, so the wait is the fix."""
+
+    def test_it_waits_and_then_carries_on(self, monkeypatch):
+        from src.periferia.core import pipewire as pipewire_mod
+
+        answers = iter([False, False, True])
+        monkeypatch.setattr(pipewire_mod, "server_ready", lambda: next(answers))
+        monkeypatch.setattr(pipewire_mod.time, "sleep", lambda s: None)
+        assert pipewire_mod.wait_for_server(timeout=5, interval=0) is True
+
+    def test_it_gives_up_after_the_timeout(self, monkeypatch):
+        from src.periferia.core import pipewire as pipewire_mod
+
+        monkeypatch.setattr(pipewire_mod, "server_ready", lambda: False)
+        monkeypatch.setattr(pipewire_mod.time, "sleep", lambda s: None)
+        assert pipewire_mod.wait_for_server(timeout=0, interval=0) is False
+
+    def test_a_server_that_is_already_up_costs_nothing(self, monkeypatch):
+        from src.periferia.core import pipewire as pipewire_mod
+
+        calls = []
+        monkeypatch.setattr(pipewire_mod, "server_ready", lambda: True)
+        monkeypatch.setattr(pipewire_mod.time, "sleep", lambda s: calls.append(s))
+        assert pipewire_mod.wait_for_server(timeout=30) is True
+        assert calls == []
+
+    def test_setup_says_a_server_is_missing_instead_of_crashing(self, monkeypatch):
+        from src.periferia.core import pipewire as pipewire_mod
+
+        monkeypatch.setattr(pipewire_mod, "wait_for_server", lambda *a, **k: False)
+        assert _daemon_for(monkeypatch).setup() is False
+
+    def test_a_refused_connection_is_a_message_not_a_traceback(self, monkeypatch):
+        from src.periferia.core import pipewire as pipewire_mod
+
+        monkeypatch.setattr(pipewire_mod, "wait_for_server", lambda *a, **k: True)
+
+        def refuse(preferred: str) -> str:
+            raise pipewire_mod.PipeWireError("Соединение отвергнуто")
+
+        monkeypatch.setattr("periferia.modules.audio.pick_physical_source", refuse)
+        assert _daemon_for(monkeypatch).setup() is False
+
+
+def _daemon_for(monkeypatch):
+    from src.periferia.core.daemon import Daemon
+
+    return Daemon(config_mod.Config(audio=config_mod.AudioConfig(enabled=True)))

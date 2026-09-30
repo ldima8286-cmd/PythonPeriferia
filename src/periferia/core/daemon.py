@@ -12,6 +12,7 @@ from collections import deque
 from pathlib import Path
 from types import FrameType
 
+from ..core import pipewire as pipewire_mod
 from ..modules.audio import VirtualMic
 from ..modules.hotkey import (
     HotkeyListener,
@@ -67,7 +68,18 @@ class Daemon:
             log.info("audio module disabled, nothing to do")
             return False
 
-        physical = self.mic.pick_physical()
+        # The daemon usually starts alongside the sound server, and winning
+        # that race used to end the process with a refused connection. Waiting
+        # costs a second on a good start and saves the session on a bad one.
+        if not pipewire_mod.wait_for_server():
+            log.error("no sound server after waiting; is pipewire running?")
+            return False
+
+        try:
+            physical = self.mic.pick_physical()
+        except pipewire_mod.PipeWireError as exc:
+            log.error("could not list capture devices: %s", exc)
+            return False
         if not physical:
             log.error("no physical capture source found")
             return False

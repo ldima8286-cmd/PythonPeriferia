@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import pytest
 
-from periferia.core import activewindow
+from periferia.core import activewindow, windowbus
 
 
 def _line(payload: str) -> str:
@@ -151,59 +151,6 @@ class TestFindInterpreter:
     never reached the system one, which is the whole point of looking.
     """
 
-    @staticmethod
-    def _patch(monkeypatch: pytest.MonkeyPatch, working: set[str]) -> list[str]:
-        import subprocess
-
-        seen: list[str] = []
-
-        def fake_run(args: list[str], timeout: float = 5.0) -> object:
-            interpreter = args[0]
-            seen.append(interpreter)
-            if interpreter in working:
-                return subprocess.CompletedProcess(args, 0, "ok", "")
-            return subprocess.CompletedProcess(args, 1, "", "No module named 'gi'")
-
-        monkeypatch.setattr(activewindow, "_run", fake_run)
-        monkeypatch.setattr(activewindow.os.path, "exists", lambda path: True)
-        monkeypatch.setattr(activewindow.shutil, "which", lambda name: f"/opt/{name}")
-        return seen
-
-    def test_moves_past_a_failing_first_candidate(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        import sys
-
-        seen = self._patch(monkeypatch, working={"/usr/bin/python3"})
-        found = activewindow.find_interpreter()
-        assert found.interpreter == "/usr/bin/python3"
-        assert sys.executable in seen
-        assert found.error == ""
-
-    def test_reports_every_attempt_when_all_fail(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        self._patch(monkeypatch, working=set())
-        found = activewindow.find_interpreter()
-        assert found.interpreter == ""
-        assert "no interpreter has PyGObject" in found.error
-        assert "/usr/bin/python3" in found.error
-
-    def test_accepts_an_interpreter_from_path(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        self._patch(monkeypatch, working={"/opt/python3"})
-        found = activewindow.find_interpreter()
-        assert found.interpreter == "/opt/python3"
-
-
-class TestGiCheck:
-    def test_check_actually_exercises_gi(self) -> None:
-        assert "require_version" in activewindow.GI_CHECK
-        assert "Gio" in activewindow.GI_CHECK
-        assert "ok" in activewindow.GI_CHECK
-
-
 class TestBusNames:
     def test_parses_gdbus_listing(self, monkeypatch: pytest.MonkeyPatch) -> None:
         import subprocess
@@ -236,23 +183,19 @@ class TestBusNames:
 
 
 def _render() -> str:
-    from periferia.core._window_receiver import BUS_NAME, INTERFACE, OBJECT_PATH
-
     return activewindow.SCRIPT % {
         "marker": activewindow.MARKER,
-        "bus": BUS_NAME,
-        "path": OBJECT_PATH,
-        "iface": INTERFACE,
+        "bus": windowbus.BUS_NAME,
+        "path": windowbus.OBJECT_PATH,
+        "iface": windowbus.INTERFACE,
     }
 
 
 class TestScript:
     def test_script_is_valid_after_substitution(self) -> None:
         rendered = _render()
-        from periferia.core._window_receiver import BUS_NAME, OBJECT_PATH
-
-        assert BUS_NAME in rendered
-        assert OBJECT_PATH in rendered
+        assert windowbus.BUS_NAME in rendered
+        assert windowbus.OBJECT_PATH in rendered
         assert rendered.count("{") == rendered.count("}")
 
     def test_tries_both_kwin_generations(self) -> None:

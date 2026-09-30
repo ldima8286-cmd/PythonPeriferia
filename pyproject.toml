@@ -24,6 +24,7 @@ classifiers = [
 dependencies = [
     "PyYAML>=6.0",
     "evdev>=2.0.0",
+  "dbus-next>=0.2.3",
 ]
 
 [project.optional-dependencies]
@@ -62,8 +63,12 @@ disallow_untyped_defs = true
 files = ["src/periferia"]
 
 [[tool.mypy.overrides]]
-module = ["gi", "gi.*"]
+module = ["dbus_next", "dbus_next.*"]
 ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = ["periferia.core.windowbus"]
+disallow_untyped_defs = false
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -17,16 +17,11 @@ import contextlib
 import json
 import os
 import re
-import select
-import shutil
 import subprocess
-import sys
 import tempfile
-import time
 from dataclasses import dataclass, field
-from pathlib import Path
 
-from ._window_receiver import BUS_NAME, INTERFACE, OBJECT_PATH
+from . import windowbus
 from .envcheck import FAIL, OK, WARN
 
 MARKER = "IRONINPUT-WINDOW-PROBE"
@@ -290,112 +285,6 @@ def _parse_marker(text: str) -> dict | None:
     return None
 
 
-RECEIVER = Path(__file__).with_name("_window_receiver.py")
-
-GI_CHECK = (
-    "import gi; gi.require_version('Gio','2.0');"
-    "from gi.repository import Gio, GLib; print('ok')"
-)
-
-
-@dataclass(slots=True)
-class Receiver:
-    interpreter: str
-    process: subprocess.Popen[str] | None = None
-    note: str = ""
-    error: str = ""
-
-    def stop(self) -> None:
-        if self.process is None:
-            return
-        with contextlib.suppress(Exception):
-            self.process.terminate()
-            self.process.wait(timeout=3)
-
-
-def find_interpreter() -> Receiver:
-    failures: list[str] = []
-    tried: list[str] = []
-    for candidate in (
-        sys.executable,
-        "/usr/bin/python3",
-        "/usr/bin/python3.13",
-        "python3",
-    ):
-        resolved = shutil.which(candidate) if not os.path.isabs(candidate) else candidate
-        if not resolved or resolved in tried:
-            continue
-        tried.append(resolved)
-        if not os.path.exists(resolved):
-            failures.append(f"{resolved}: not present")
-            continue
-        out = _run([resolved, "-c", GI_CHECK], timeout=25.0)
-        if out.returncode == 0 and "ok" in out.stdout:
-            return Receiver(resolved, note="")
-        detail = (out.stderr or out.stdout).strip().splitlines()
-        failures.append(
-            f"{resolved}: {detail[-1] if detail else 'PyGObject check failed'}"
-        )
-    if not tried:
-        return Receiver("", error="no python interpreter was found at all")
-    listed = "\n".join(failures)
-    return Receiver("", error=f"no interpreter has PyGObject:\n{listed}")
-
-
-def start_receiver(found: Receiver) -> WindowReport | None:
-    process = subprocess.Popen(
-        [found.interpreter, str(RECEIVER)],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        bufsize=1,
-    )
-    found.process = process
-    assert process.stdout is not None
-    line = process.stdout.readline()
-    if not line:
-        return WindowReport(FAIL, "the receiver exited before it was ready", found.error)
-    try:
-        first = json.loads(line)
-    except json.JSONDecodeError:
-        return WindowReport(FAIL, "the receiver printed something unexpected", line.strip()[:120])
-    if not first.get("ready"):
-        return WindowReport(
-            FAIL,
-            "the receiver could not take a name on the bus",
-            str(first.get("error", "")) + f"\n{_gi_hint()}",
-        )
-    return None
-
-
-def _gi_hint() -> str:
-    return (
-        "install the system PyGObject, then run this from a terminal, not a Flatpak: "
-        "dnf install python3-gobject  (on Bazzite: rpm-ostree install python3-gobject, "
-        "or use the discover/layer tooling your image provides)"
-    )
-
-
-def _read_report(process: subprocess.Popen[str], timeout: float) -> dict | None:
-    assert process.stdout is not None
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        ready, _, _ = select.select([process.stdout], [], [], 0.25)
-        if not ready:
-            continue
-        line = process.stdout.readline()
-        if not line:
-            return None
-        try:
-            parsed = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if isinstance(parsed, dict) and "report" in parsed:
-            report = parsed["report"]
-            return report if isinstance(report, dict) else None
-    return None
-
-
 def probe(timeout: float = 12.0) -> WindowReport:
     bus = inspect_bus()
     if bus.is_flatpak_proxy and not bus.has_real_socket:
@@ -408,28 +297,31 @@ def probe(timeout: float = 12.0) -> WindowReport:
     if not shutil_which("gdbus"):
         return WindowReport(FAIL, "gdbus is not installed", "install glib2 tools")
 
-    since = f"-{int(timeout) + 5} seconds"
-    found = find_interpreter()
-    if found.error:
+    if not windowbus.HAVE_DBUS:
         return WindowReport(
             FAIL,
-            "no usable PyGObject, so the compositor has nowhere to report to",
-            f"{found.error}\n{_gi_hint()}",
+            "no D-Bus client, so the compositor has nowhere to report to",
+            windowbus.MISSING,
         )
 
-    receiver = start_receiver(found)
+    since = f"-{int(timeout) + 5} seconds"
+    service = windowbus.WindowService()
     handle, path = tempfile.mkstemp(prefix="periferia-kwin-probe-", suffix=".js")
     try:
-        if receiver is not None:
-            return receiver
+        if not service.start():
+            return WindowReport(
+                FAIL,
+                "could not take a name on the session bus",
+                f"{service.error}\n{windowbus.BUS_NAME}",
+            )
         with os.fdopen(handle, "w") as stream:
             stream.write(
                 SCRIPT
                 % {
                     "marker": MARKER,
-                    "bus": BUS_NAME,
-                    "path": OBJECT_PATH,
-                    "iface": INTERFACE,
+                    "bus": windowbus.BUS_NAME,
+                    "path": windowbus.OBJECT_PATH,
+                    "iface": windowbus.INTERFACE,
                 }
             )
         loaded = _gdbus("loadScript", path, SCRIPT_NAME)
@@ -443,8 +335,7 @@ def probe(timeout: float = 12.0) -> WindowReport:
                 path=f"{SCRIPTING_PATH}/Script{script_id}",
                 interface=SCRIPT_IFACE,
             )
-        assert found.process is not None
-        report = _read_report(found.process, timeout)
+        report = service.next_report(timeout)
         if report is None:
             return WindowReport(
                 WARN,
@@ -481,7 +372,7 @@ def probe(timeout: float = 12.0) -> WindowReport:
     finally:
         with contextlib.suppress(OSError):
             os.unlink(path)
-        found.stop()
+        service.stop()
 
 
 def cleanup(script_id: int | None) -> None:

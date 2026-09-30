@@ -79,20 +79,9 @@ function basics(client) {
         "resourceClass": read(client, "resourceClass"),
         "resourceName": read(client, "resourceName"),
         "windowRole": read(client, "windowRole"),
-        "desktopFile": read(client, "desktopFile")
+        "desktopFile": read(client, "desktopFile"),
+        "internalId": read(client, "internalId")
     };
-}
-
-function extras(client) {
-    var names = [
-        "windowClass", "resource_name", "resource_class",
-        "app_id", "wm_class", "surfaceClass", "internalId"
-    ];
-    var out = {};
-    for (var i = 0; i < names.length; i++) {
-        out[names[i]] = read(client, names[i]);
-    }
-    return out;
 }
 
 function send() {
@@ -102,10 +91,6 @@ function send() {
         return;
     }
     report("basics", basics(client));
-    try {
-        report("extras", extras(client));
-    } catch (error) {
-    }
 }
 
 report("hello", {"ok": "1"});
@@ -144,12 +129,17 @@ class WindowReport:
         return out
 
     def interesting(self) -> list[tuple[str, str]]:
+        return [(name, value) for name, value in self._read() if value]
+
+    def silent(self) -> list[str]:
+        return [name for name, value in self._read() if not value]
+
+    def _read(self) -> list[tuple[str, str | None]]:
         out = []
         for name, entry in self.fields.items():
             if isinstance(entry, dict):
                 entry = entry.get("text")
-            if entry:
-                out.append((name, str(entry)))
+            out.append((name, str(entry) if entry else None))
         return out
 
 
@@ -494,11 +484,6 @@ def probe(
                     if later is None:
                         break
                     on_report(_summarize(later, script_id))
-        else:
-            extra = service.next_report(timeout=1.5)
-            if extra is not None:
-                first.fields.update(extra.get("fields") or {})
-                first = _summarize({"fields": first.fields}, script_id)
         return first
     finally:
         with contextlib.suppress(OSError):

@@ -129,6 +129,22 @@ class TestSummarize:
         )
         assert report.interesting() == [("caption", "Steam")]
 
+    def test_silent_never_overlaps_interesting(self) -> None:
+        """The two lists were once derived separately and came to disagree."""
+        report = activewindow._summarize(
+            {
+                "fields": {
+                    "caption": "Konsole",
+                    "resourceClass": "org.kde.konsole",
+                    "windowRole": None,
+                }
+            },
+            None,
+        )
+        named = [name for name, _ in report.interesting()]
+        assert not set(named) & set(report.silent())
+        assert set(named) | set(report.silent()) == set(report.fields)
+
     def test_compositor_error_is_passed_through(self) -> None:
         report = activewindow._summarize({"error": "no active client"}, None)
         assert "no active client" in report.detail
@@ -303,14 +319,21 @@ def _render() -> str:
 
 
 class TestScript:
-    def test_the_baseline_is_sent_before_the_speculative_pass(self) -> None:
-        rendered = _render()
-        assert rendered.index('report("basics"') < rendered.index('report("extras"')
+    def test_it_says_hello_before_it_touches_the_window(self) -> None:
+        tail = [line.strip() for line in _render().strip().splitlines() if line.strip()]
+        hello = next(i for i, line in enumerate(tail) if line.startswith('report("hello"'))
+        called = next(i for i, line in enumerate(tail) if line == "send();")
+        assert hello < called, tail[hello : called + 1]
 
-    def test_the_speculative_pass_is_guarded(self) -> None:
-        send = _render().split("function send()")[1]
-        head = send[: send.index('report("extras"')]
-        assert "try" in head[-400:]
+    def test_it_does_not_ask_for_names_kwin_has_never_had(self) -> None:
+        rendered = _render()
+        for gone in ("wm_class", "app_id", "surfaceClass", "windowClass"):
+            assert gone not in rendered
+
+    def test_the_fields_it_asks_for_are_the_ones_kwin_answers(self) -> None:
+        rendered = _render()
+        for name in ("caption", "resourceClass", "resourceName", "windowRole"):
+            assert f'read(client, "{name}")' in rendered
 
     def test_script_is_valid_after_substitution(self) -> None:
         rendered = _render()

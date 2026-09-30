@@ -165,11 +165,7 @@ def cmd_probe_window(args: argparse.Namespace) -> int:
         for name, value in report.interesting():
             print(f"  {name:16} {value}")
     if report.fields:
-        silent = [
-            name
-            for name, entry in report.fields.items()
-            if not (isinstance(entry, dict) and entry.get("text"))
-        ]
+        silent = report.silent()
         if silent:
             print(f"\n  {DIM}nothing for: {', '.join(silent)}{RESET}")
     matchable = report.matchable()

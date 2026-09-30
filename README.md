@@ -315,8 +315,9 @@ reports on this.
       detection on Wayland
 - [ ] RGB control with scripts and time-of-day profiles. Needs raw HID access,
       which this machine does not expose
-- [ ] compressor and de-esser. Blocked: this PipeWire has no `module-lv2`, no
-      `module-filter-chain` and no LADSPAF host, so there is nowhere to put one
+- [ ] compressor and de-esser. Not going to happen here: filter-chain will not
+      load, so there is nowhere to put one. EasyEffects does this properly
+      already
 - [ ] direct PipeWire graph control, instead of going through pactl
 - [ ] Flatpak packaging, AUR
 
@@ -328,10 +329,11 @@ jack. It is not implemented, and the reason was misdiagnosed once already:
 `pactl load-module module-filter-chain` fails with "no such object", but that
 does not mean the module is missing. `libpipewire-module-filter-chain.so` is
 present in the ostree image, and `pactl list short modules` only ever lists
-loaded modules, so its absence from that list proved nothing. The load still
-fails, and the reason is not yet known, so treat this as unresolved rather than
-as impossible. filter-chain would also be the natural host for a compressor, so
-it is worth one more look from a real shell.
+loaded modules, so its absence from that list proved nothing. The load still fails from a real shell too, with the short module name and a
+graph taken from the manual, so filter-chain is not reachable through
+`pactl load-module` here and the reason remains unknown. compressor and
+de-esser. Blocked: this PipeWire has no `module-lv2`, no
+`module-filter-chain` and no LADSPAF host, so there is nowhere to put one
 
 It is also not established that the problem exists. A card that duplicates one
 mono input into both channels needs no downmix, and no one has measured whether

@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import contextlib
 import json
+import os
 import re
 import select
 import shutil
@@ -13,8 +14,8 @@ import time
 from pathlib import Path
 from typing import Any
 
+from .core import activewindow, envcheck, pipewire
 from .core import config as config_mod
-from .core import envcheck, pipewire
 from .core import state as state_mod
 from .modules import audio as audio_mod
 from .modules import hotkey
@@ -126,6 +127,47 @@ def cmd_pick_key(args: argparse.Namespace) -> int:
             with contextlib.suppress(OSError):
                 dev.close()
     return 1
+
+
+def cmd_probe_window(args: argparse.Namespace) -> int:
+    bus = activewindow.inspect_bus()
+    print(f"{BOLD}session bus{RESET}")
+    if bus.is_flatpak_proxy:
+        print(f"  {_c('wrong bus', BOLD + YELLOW)}: {bus.detail}")
+    else:
+        print(f"  {bus.detail}")
+    if bus.has_real_socket:
+        print(f"  a real socket exists at {os.environ.get('XDG_RUNTIME_DIR')}/bus")
+
+    print(f"\n{BOLD}active window{RESET}")
+    report = activewindow.probe(timeout=args.timeout)
+    if report.status == envcheck.OK:
+        print(f"  {_c('found', BOLD + GREEN)}: {report.detail}")
+    elif report.status == envcheck.WARN:
+        print(f"  {_c('partial', BOLD + YELLOW)}: {report.detail}")
+    else:
+        print(f"  {_c('no', BOLD + YELLOW)}: {report.detail}")
+    if report.hint:
+        print(f"  {DIM}{report.hint}{RESET}")
+
+    if report.caption or report.resource_class or report.resource_name:
+        print(f"\n{BOLD}what the compositor would see{RESET}")
+        for label, value in (
+            ("caption", report.caption),
+            ("resourceClass", report.resource_class),
+            ("resourceName", report.resource_name),
+            ("windowRole", report.window_role),
+            ("desktopFile", report.desktop_file),
+        ):
+            if value:
+                print(f"  {label:14} {value}")
+        matchable = report.matchable()
+        if matchable:
+            print(f"\n  a profile could match on: {_c(', '.join(matchable), GREEN)}")
+        else:
+            print(f"\n  {YELLOW}no stable field to match a profile on{RESET}")
+    activewindow.cleanup(report.script_id)
+    return 0 if report.status == envcheck.OK else 1
 
 
 def cmd_list_sources(args: argparse.Namespace) -> int:
@@ -455,6 +497,17 @@ def build_parser() -> argparse.ArgumentParser:
     gate.add_argument("source", nargs="?", help="source to watch, defaults to the daemon's")
     gate.add_argument("--timeout", type=float, default=30.0, help="seconds to wait, default 30")
     gate.set_defaults(func=cmd_gate_check)
+    probe = sub.add_parser(
+        "probe-window",
+        help="find out whether the compositor can name the focused window",
+    )
+    probe.add_argument(
+        "--timeout",
+        type=float,
+        default=12.0,
+        help="how long to wait for the compositor to answer, default 12",
+    )
+    probe.set_defaults(func=cmd_probe_window)
     sub.add_parser("teardown", help="unload leftover echo-cancel modules").set_defaults(
         func=cmd_teardown
     )

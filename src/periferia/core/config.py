@@ -76,13 +76,18 @@ class ProcessingConfig:
 class ProfileConfig:
     """One keyboard layout to switch to: which physical key becomes which.
 
-    Only one profile is applied at a time. Deciding which one from the focused
-    window is the part that needs a portal on Wayland, so for now `enabled` is
-    all that selects.
+    `match` says which windows this profile belongs to, by resource class or
+    resource name as the compositor reports them. A profile with no `match` is
+    the fallback for everything nothing else claimed.
+
+    `match` deliberately has no way to name a window by caption. Captions change
+    with the window's contents, so a profile matched on one would apply and stop
+    applying as the same program showed different text.
     """
 
     name: str = "default"
     enabled: bool = True
+    match: dict[str, str] = dataclasses.field(default_factory=dict)
     remap: dict[str, str] = dataclasses.field(default_factory=dict)
 
 

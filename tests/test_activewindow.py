@@ -8,6 +8,8 @@ line with other text around it, and a parser that is too strict here reports
 
 from __future__ import annotations
 
+import subprocess
+
 import pytest
 
 from periferia.core import activewindow, envcheck, windowbus
@@ -82,6 +84,27 @@ class TestSummarize:
     def _fields(self, **values: str) -> dict:
         return {name: {"kind": "string", "text": v} for name, v in values.items()}
 
+    def test_plain_string_fields_are_understood(self) -> None:
+        report = activewindow._summarize(
+            {"stage": "basics", "fields": {"caption": "Steam", "resourceClass": None}},
+            None,
+        )
+        assert report.caption == "Steam"
+        assert report.interesting() == [("caption", "Steam")]
+        assert report.status == envcheck.WARN
+
+    def test_a_baseline_survives_a_dead_extras_pass(self) -> None:
+        report = activewindow._summarize(
+            {"stage": "basics", "fields": {"resourceClass": "steam"}}, None
+        )
+        assert report.matchable() == ["resourceClass"]
+
+    def test_the_error_stage_is_reported(self) -> None:
+        report = activewindow._summarize(
+            {"stage": "error", "fields": {"message": "no active client"}}, None
+        )
+        assert "no active client" in report.detail
+
     def test_resource_class_makes_it_a_match(self) -> None:
         report = activewindow._summarize(
             {"fields": self._fields(caption="Steam", resourceClass="steam")}, None
@@ -109,6 +132,61 @@ class TestSummarize:
     def test_compositor_error_is_passed_through(self) -> None:
         report = activewindow._summarize({"error": "no active client"}, None)
         assert "no active client" in report.detail
+
+
+class _FakeService:
+    def __init__(self, reports: list[dict]) -> None:
+        self.reports = list(reports)
+        self.asked: list[float] = []
+
+    def next_report(self, timeout: float) -> dict | None:
+        self.asked.append(timeout)
+        return self.reports.pop(0) if self.reports else None
+
+
+class TestAwaitWindow:
+    def test_a_hello_alone_means_the_script_is_alive(self) -> None:
+        service = _FakeService([{"stage": "hello", "fields": {"ok": "1"}}])
+        report, alive = activewindow._await_window(service, 0.2, None)
+        assert report is None
+        assert alive is True
+
+    def test_silence_means_the_script_never_ran(self) -> None:
+        report, alive = activewindow._await_window(_FakeService([]), 0.05, None)
+        assert report is None
+        assert alive is False
+
+    def test_a_hello_does_not_count_as_window_data(self) -> None:
+        service = _FakeService(
+            [
+                {"stage": "hello", "fields": {}},
+                {"stage": "basics", "fields": {"caption": "Steam"}},
+            ]
+        )
+        report, alive = activewindow._await_window(service, 1.0, None)
+        assert report is not None
+        assert report["fields"]["caption"] == "Steam"
+        assert alive is True
+
+    def test_an_error_stage_comes_straight_back(self) -> None:
+        service = _FakeService([{"stage": "error", "fields": {"message": "none"}}])
+        report, _ = activewindow._await_window(service, 1.0, None)
+        assert report is not None
+        assert report["stage"] == "error"
+
+
+class TestStepCodes:
+    def _run(self, code: int, err: str = "") -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess([], code, "", err)
+
+    def test_a_clean_step_says_so(self) -> None:
+        assert activewindow._step_codes([("start", self._run(0))]) == [
+            "start (exit 0): ok"
+        ]
+
+    def test_a_failing_step_shows_the_complaint(self) -> None:
+        line = activewindow._step_codes([("run", self._run(1, "no such object\n"))])
+        assert line == ["run (exit 1): no such object"]
 
 
 class TestMatchable:
@@ -225,6 +303,15 @@ def _render() -> str:
 
 
 class TestScript:
+    def test_the_baseline_is_sent_before_the_speculative_pass(self) -> None:
+        rendered = _render()
+        assert rendered.index('report("basics"') < rendered.index('report("extras"')
+
+    def test_the_speculative_pass_is_guarded(self) -> None:
+        send = _render().split("function send()")[1]
+        head = send[: send.index('report("extras"')]
+        assert "try" in head[-400:]
+
     def test_script_is_valid_after_substitution(self) -> None:
         rendered = _render()
         assert windowbus.BUS_NAME in rendered

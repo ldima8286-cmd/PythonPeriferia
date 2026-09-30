@@ -19,6 +19,7 @@ import os
 import re
 import subprocess
 import tempfile
+import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
@@ -36,39 +37,56 @@ SCRIPTING_IFACE = "org.kde.kwin.Scripting"
 SCRIPT_IFACE = "org.kde.kwin.Script"
 
 SCRIPT = """
-var sent = false;
-
-function read(client, name) {
-    var value;
-    try {
-        value = client[name];
-    } catch (error) {
-        return {"kind": "unreadable"};
-    }
-    if (value === undefined) {
-        return {"kind": "absent"};
-    }
-    if (value === null) {
-        return {"kind": "null"};
-    }
-    var text = null;
-    try {
-        text = "" + value;
-    } catch (error) {
-        try {
-            text = String(value);
-        } catch (other) {
-            text = null;
-        }
-    }
-    return {"kind": typeof value, "text": text};
+function report(stage, fields) {
+    callDBus(
+        "%(bus)s", "%(path)s", "%(iface)s", "Report",
+        JSON.stringify({"stage": stage, "fields": fields})
+    );
 }
 
-function describe(client) {
+function active() {
+    try {
+        if (workspace.activeClient !== null && workspace.activeClient !== undefined) {
+            return workspace.activeClient;
+        }
+    } catch (error) {
+    }
+    try {
+        return workspace.activeWindow;
+    } catch (error) {
+        return null;
+    }
+}
+
+function read(client, name) {
+    try {
+        var value = client[name];
+        if (value === undefined) {
+            return null;
+        }
+        if (value === null) {
+            return null;
+        }
+        return "" + value;
+    } catch (error) {
+        return null;
+    }
+}
+
+function basics(client) {
+    return {
+        "caption": read(client, "caption"),
+        "resourceClass": read(client, "resourceClass"),
+        "resourceName": read(client, "resourceName"),
+        "windowRole": read(client, "windowRole"),
+        "desktopFile": read(client, "desktopFile")
+    };
+}
+
+function extras(client) {
     var names = [
-        "caption", "resourceClass", "resourceName", "windowRole",
-        "desktopFile", "internalId", "windowClass", "resource_name",
-        "resource_class", "app_id", "wm_class", "surfaceClass"
+        "windowClass", "resource_name", "resource_class",
+        "app_id", "wm_class", "surfaceClass", "internalId"
     ];
     var out = {};
     for (var i = 0; i < names.length; i++) {
@@ -78,33 +96,19 @@ function describe(client) {
 }
 
 function send() {
-    var client = null;
-    try {
-        client = workspace.activeClient;
-    } catch (error) {
-        client = null;
-    }
+    var client = active();
     if (client === null) {
-        try {
-            client = workspace.activeWindow;
-        } catch (error) {
-            client = null;
-        }
-    }
-    if (client === null) {
-        callDBus(
-            "%(bus)s", "%(path)s", "%(iface)s", "Report",
-            JSON.stringify({"error": "no active client", "fields": {}})
-        );
+        report("error", {"message": "no active client"});
         return;
     }
-    callDBus(
-        "%(bus)s", "%(path)s", "%(iface)s", "Report",
-        JSON.stringify({"fields": describe(client), "sequence": sent + 1})
-    );
-    sent = sent + 1;
+    report("basics", basics(client));
+    try {
+        report("extras", extras(client));
+    } catch (error) {
+    }
 }
 
+report("hello", {"ok": "1"});
 send();
 
 try {
@@ -142,8 +146,10 @@ class WindowReport:
     def interesting(self) -> list[tuple[str, str]]:
         out = []
         for name, entry in self.fields.items():
-            if isinstance(entry, dict) and entry.get("text"):
-                out.append((name, str(entry["text"])))
+            if isinstance(entry, dict):
+                entry = entry.get("text")
+            if entry:
+                out.append((name, str(entry)))
         return out
 
 
@@ -311,15 +317,21 @@ def _parse_marker(text: str) -> dict | None:
     return None
 
 
-def _text(report: dict[str, Any], name: str) -> str | None:
-    entry = report.get(name)
+def _text(fields: dict[str, Any], name: str) -> str | None:
+    entry = fields.get(name)
     if isinstance(entry, dict):
-        value = entry.get("text")
-        return str(value) if value else None
+        entry = entry.get("text")
     return str(entry) if entry else None
 
 
 def _summarize(report: dict[str, Any], script_id: int | None) -> WindowReport:
+    if report.get("stage") == "error":
+        return WindowReport(
+            WARN,
+            f"KWin reported: {(report.get('fields') or {}).get('message', '?')}",
+            "the compositor is alive but exposed no active client",
+            script_id=script_id,
+        )
     if report.get("error"):
         return WindowReport(
             WARN,
@@ -355,6 +367,34 @@ def _summarize(report: dict[str, Any], script_id: int | None) -> WindowReport:
         script_id=script_id,
         fields=fields,
     )
+
+
+def _await_window(
+    service: windowbus.WindowService, timeout: float, script_id: int | None
+) -> tuple[dict[str, Any] | None, bool]:
+    """Wait for the window report, treating the hello as liveness, not data."""
+    deadline = time.monotonic() + timeout
+    alive = False
+    while True:
+        left = deadline - time.monotonic()
+        if left <= 0:
+            return None, alive
+        report = service.next_report(timeout=left)
+        if report is None:
+            return None, alive
+        if report.get("stage") == "hello":
+            alive = True
+            continue
+        return report, True
+
+
+def _step_codes(steps: list[tuple[str, subprocess.CompletedProcess[str]]]) -> list[str]:
+    out = []
+    for label, result in steps:
+        detail = (result.stderr or result.stdout or "").strip().splitlines()
+        first = detail[0] if detail else "ok"
+        out.append(f"{label} (exit {result.returncode}): {first}")
+    return out
 
 
 def probe(
@@ -403,19 +443,47 @@ def probe(
         if loaded.returncode != 0:
             return _explain(loaded)
         script_id = _parse_int(loaded.stdout)
-        _gdbus("start")
+        steps = [("loadScript", loaded)]
+        started = _gdbus("start")
+        steps.append(("start", started))
+        if started.returncode != 0:
+            return _explain(started)
         if script_id is not None:
-            _gdbus(
+            ran = _gdbus(
                 "run",
                 path=f"{SCRIPTING_PATH}/Script{script_id}",
                 interface=SCRIPT_IFACE,
             )
-        report = service.next_report(timeout)
+            steps.append(("run", ran))
+            if ran.returncode != 0:
+                return _explain(ran)
+        report, alive = _await_window(service, timeout, script_id)
         if report is None:
+            if alive:
+                return WindowReport(
+                    WARN,
+                    "the script runs, but it cannot read the active window",
+                    "\n".join(
+                        [
+                            "its hello arrived, so the script and the bus are fine; "
+                            "reading the window is what fails",
+                            *_step_codes(steps),
+                            *diagnose(since),
+                        ]
+                    ),
+                    script_id=script_id,
+                )
             return WindowReport(
                 WARN,
                 "KWin took the script, but nothing came back over the bus",
-                "\n".join(diagnose(since)),
+                "\n".join(
+                    [
+                        "the script did not report, not even its own hello, so it "
+                        "either failed to run or callDBus is not reaching us",
+                        *_step_codes(steps),
+                        *diagnose(since),
+                    ]
+                ),
                 script_id=script_id,
             )
         first = _summarize(report, script_id)
@@ -426,6 +494,11 @@ def probe(
                     if later is None:
                         break
                     on_report(_summarize(later, script_id))
+        else:
+            extra = service.next_report(timeout=1.5)
+            if extra is not None:
+                first.fields.update(extra.get("fields") or {})
+                first = _summarize({"fields": first.fields}, script_id)
         return first
     finally:
         with contextlib.suppress(OSError):

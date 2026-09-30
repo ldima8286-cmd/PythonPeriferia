@@ -8,6 +8,7 @@ import sys
 import threading
 import time
 from collections import deque
+from pathlib import Path
 from types import FrameType
 
 from ..modules.audio import VirtualMic
@@ -18,6 +19,8 @@ from ..modules.hotkey import (
     resolve_key,
 )
 from ..modules.processing import MicProcessing
+from ..modules.remap import RemapError, active_remap
+from ..modules.router import KeyboardRouter
 from . import config as config_mod
 from . import logging_setup
 from . import state as state_mod
@@ -36,7 +39,7 @@ class Daemon:
         # a mic nobody is holding down.
         self._latched = False
         self._stop = threading.Event()
-        self._listener: HotkeyListener | None = None
+        self._listener: HotkeyListener | KeyboardRouter | None = None
         # Timestamps of the last few state changes, so a caller can tell what
         # actually happened instead of inferring it from the output. Written
         # from the listener thread, read from anywhere.
@@ -127,16 +130,59 @@ class Daemon:
 
         panic = resolve_key(self.cfg.ptt.panic_key) if self.cfg.ptt.panic_key else None
 
-        self._listener = HotkeyListener(
-            devices,
-            code,
-            panic_code=panic,
-            ignore_repeat=self.cfg.ptt.ignore_repeat,
-            on_press=self.on_press,
-            on_release=self.on_release,
-            on_panic=self.on_panic,
-        )
+        try:
+            table = active_remap(self.cfg.profiles)
+        except RemapError as exc:
+            log.error("ignoring the keyboard profile: %s", exc)
+            table = None
+        if table:
+            self._listener = self._make_router(devices, code, panic, table)
+        else:
+            self._listener = HotkeyListener(
+                devices,
+                code,
+                panic_code=panic,
+                ignore_repeat=self.cfg.ptt.ignore_repeat,
+                on_press=self.on_press,
+                on_release=self.on_release,
+                on_panic=self.on_panic,
+            )
         return True
+
+    def _make_router(
+        self, devices: list[Path], code: int, panic: int | None, table: dict[int, int]
+    ) -> HotkeyListener | KeyboardRouter:
+        """Build a router, or fall back to plain listening if it cannot start.
+
+        A profile that cannot be applied is not worth the microphone. If the
+        grab or the virtual device fails, push-to-talk carries on unmodified and
+        the reason is logged, rather than the daemon refusing to start.
+        """
+        try:
+            router = KeyboardRouter(
+                devices,
+                code,
+                panic_code=panic,
+                ignore_repeat=self.cfg.ptt.ignore_repeat,
+                table=table,
+                on_press=self.on_press,
+                on_release=self.on_release,
+                on_panic=self.on_panic,
+            )
+            router.open()
+        except Exception as exc:
+            log.error("cannot remap the keyboard, continuing without it: %s", exc)
+            return HotkeyListener(
+                devices,
+                code,
+                panic_code=panic,
+                ignore_repeat=self.cfg.ptt.ignore_repeat,
+                on_press=self.on_press,
+                on_release=self.on_release,
+                on_panic=self.on_panic,
+            )
+        log.info("keyboard profile is active")
+        return router
 
     def on_press(self) -> None:
         if self._latched:

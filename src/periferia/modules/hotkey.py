@@ -85,6 +85,20 @@ def key_label(code: int) -> str:
     return name.removeprefix("KEY_")
 
 
+VIRTUAL_NAME_PREFIX = "Periferia virtual"
+
+
+def is_virtual_device(name: str) -> bool:
+    """True for a virtual keyboard this program made.
+
+    Discovery has to recognise these. A leftover virtual device from a previous
+    run still advertises every key the program can press, so it passes for a
+    real keyboard, and grabbing it would stack a new virtual device on the old
+    one and feed the output back into its own input.
+    """
+    return name.startswith(VIRTUAL_NAME_PREFIX)
+
+
 def list_input_devices() -> list[tuple[Path, str]]:
     """Return (event node, readable name) for every input device we could use.
 
@@ -284,10 +298,14 @@ def find_keyboards(
             log.debug("cannot open %s: %s", target, exc)
             continue
         try:
+            ours = is_virtual_device(getattr(dev, "name", "") or "")
             usable = is_keyboard(dev) or (include_pointers and is_pointer(dev))
         finally:
             with contextlib.suppress(OSError):
                 dev.close()
+        if ours:
+            log.debug("skipping %s: it is a virtual device of ours", target)
+            continue
         if not usable:
             continue
         # Every usable node is watched. Picking one node per physical device

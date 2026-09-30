@@ -19,6 +19,14 @@ def code(name: str) -> int:
     return ecodes.ecodes[name]
 
 
+class _Entry:
+    """Stands in for ProfileConfig without importing the config module."""
+
+    def __init__(self, enabled: bool, remap: dict[str, str]) -> None:
+        self.enabled = enabled
+        self.remap = remap
+
+
 class TestBuildRemap:
     def test_empty_is_allowed(self):
         assert build_remap({}) == {}
@@ -131,3 +139,38 @@ class TestProfile:
             code("KEY_CAPSLOCK")
         ]
         assert profile.conflicts_with(code("KEY_A")) == []
+
+
+class TestActiveRemap:
+    def test_no_profiles_means_no_table(self):
+        from src.periferia.modules.remap import active_remap
+
+        assert active_remap([]) is None
+
+    def test_disabled_profile_is_skipped(self):
+        from src.periferia.modules.remap import active_remap
+
+        entries = [_Entry(enabled=False, remap={"KEY_A": "KEY_B"})]
+        assert active_remap(entries) is None
+
+    def test_empty_profile_is_skipped(self):
+        from src.periferia.modules.remap import active_remap
+
+        assert active_remap([_Entry(enabled=True, remap={})]) is None
+
+    def test_first_enabled_profile_wins(self):
+        from src.periferia.modules.remap import active_remap
+
+        entries = [
+            _Entry(enabled=False, remap={"KEY_A": "KEY_B"}),
+            _Entry(enabled=True, remap={"KEY_C": "KEY_D"}),
+            _Entry(enabled=True, remap={"KEY_E": "KEY_F"}),
+        ]
+        table = active_remap(entries)
+        assert table == {code("KEY_C"): code("KEY_D")}
+
+    def test_invalid_table_raises_rather_than_returning_empty(self):
+        from src.periferia.modules.remap import active_remap
+
+        with pytest.raises(RemapError):
+            active_remap([_Entry(enabled=True, remap={"KEY_A": "KEY_LEFTSHIFT"})])

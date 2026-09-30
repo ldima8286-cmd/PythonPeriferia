@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import dataclasses
 from collections.abc import Iterable, Mapping
+from typing import Any
 
 from evdev import ecodes
 
@@ -118,6 +119,26 @@ def translate_events(
         else:
             out.append((ev_type, code, value))
     return out
+
+
+def active_remap(profiles: Iterable[Any]) -> dict[int, int] | None:
+    """Build the table for the profile in effect, or None to leave keys alone.
+
+    Only the first enabled profile is used. Selecting by focused window is the
+    part that needs a Wayland portal, and a list of profiles that silently
+    always means the first one is worse than a single profile named clearly.
+
+    Raises RemapError on a table that cannot be applied. The caller decides
+    whether that is fatal; a broken table should be reported, not obeyed.
+    """
+    for entry in profiles:
+        if not getattr(entry, "enabled", True):
+            continue
+        pairs = getattr(entry, "remap", None) or {}
+        if not pairs:
+            continue
+        return build_remap(pairs)
+    return None
 
 
 @dataclasses.dataclass(frozen=True, slots=True)

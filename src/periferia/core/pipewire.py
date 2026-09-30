@@ -102,6 +102,29 @@ def source_exists(name: str) -> bool:
     return get_source(name) is not None
 
 
+def get_volume(name: str) -> float | None:
+    """What fraction of full volume a source is carrying right now.
+
+    Read from the same JSON the rest of this module uses, rather than from
+    `get-source-volume`, because the answer needed to tell whether the gate is
+    moving has to be the one the gate itself moves. pactl reports the value as
+    a hex string, which is why it is not simply read as a number.
+    """
+    item = get_source(name)
+    if item is None:
+        return None
+    raw = item.get("volume")
+    if raw is None:
+        return None
+    try:
+        value = int(str(raw), 16) if isinstance(raw, str) else int(raw)
+    except (TypeError, ValueError):
+        return None
+    # A muted source is silent whatever its volume says, and the gate is a
+    # volume rather than a mute, so this is the number worth reporting.
+    return max(0.0, min(1.0, value / PA_PERCENT))
+
+
 def server_ready() -> bool:
     """Whether the sound server will answer at all.
 

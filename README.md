@@ -104,12 +104,29 @@ everything that needs no input.
 It takes over the microphone while it runs, so stop the service first:
 
 ```bash
-systemctl --user stop periphery
+systemctl --user stop periferia
 periferia tui
 ```
 
 It needs no dependencies beyond the standard library, so it works over ssh and
 in a container where a GUI would not start.
+
+### When the microphone itself cannot be tested
+
+Some of the chain can be proved without a working capture device, and it is
+worth separating the parts, because "PTT does nothing" otherwise has three
+possible causes and no way to tell them apart. The gate moves a source's
+volume, and a source's volume moves whether or not any sound is passing
+through it:
+
+```bash
+periferia gate-check
+```
+
+It reports the volume, waits half a minute, and says whether it rose while you
+held the PTT key. If it rose, then the key reached the daemon, the ramp ran and
+pactl accepted the write. What that does not prove is that any application
+opens the source: that needs a recording, or a level meter in a voice chat.
 
 ## First run
 

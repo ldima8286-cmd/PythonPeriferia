@@ -177,6 +177,67 @@ def cmd_set_default(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_gate_check(args: argparse.Namespace) -> int:
+    """Watch the gate move, without needing a microphone to work.
+
+    Everything up to the last step can be proved without sound: if the virtual
+    source is there and its volume follows the key, then the daemon heard the
+    key, the ramp ran, and pactl accepted the write. Whether any application
+    opens that source is a separate question that only a recording answers.
+
+    The point is to stop "PTT did nothing" from having three possible causes.
+    """
+    note = state_mod.read()
+    name = getattr(args, "source", None) or (note or {}).get("source") or ""
+    if not name:
+        print(
+            "no source to watch. Start the daemon, or pass one: "
+            "periferia gate-check NAME",
+            file=sys.stderr,
+        )
+        return 1
+
+    before = pipewire.get_volume(name)
+    if before is None:
+        print(f"{name} does not exist right now. Is the daemon running?", file=sys.stderr)
+        print("start it, or run 'periferia teardown' and restart it", file=sys.stderr)
+        return 1
+
+    running = state_mod.is_running(note)
+    if not running:
+        print("warning: no daemon is running, so nothing is going to move\n", file=sys.stderr)
+
+    print(f"watching {name}, currently at {before:.0%}")
+    print("press and hold the PTT key. Ctrl+C to give up.\n")
+
+    peak = before
+    limit = getattr(args, "timeout", 30.0)
+    deadline = time.monotonic() + limit
+    try:
+        while time.monotonic() < deadline:
+            level = pipewire.get_volume(name)
+            if level is not None and level > peak:
+                peak = level
+                print(f"  moved to {level:.0%}")
+            if peak > 0.5:
+                break
+            time.sleep(0.05)
+    except KeyboardInterrupt:
+        print()
+        print("gave up before the gate moved")
+        return 1
+
+    if peak <= 0.5:
+        print(f"still at {peak:.0%} after {limit:.0f}s: the gate did not move")
+        print("check the daemon's log for 'volume update failed'", file=sys.stderr)
+        return 1
+
+    print(f"\nthe gate moved: {before:.0%} -> {peak:.0%}")
+    print("the key, the daemon and pactl are all working.")
+    print("what is left is whether an application opens this source.")
+    return 0
+
+
 def cmd_teardown(args: argparse.Namespace) -> int:
     """Unload echo-cancel modules left behind by a crash."""
     try:
@@ -387,6 +448,13 @@ def build_parser() -> argparse.ArgumentParser:
     )
     pick.set_defaults(func=cmd_pick_key)
     sub.add_parser("sources", help="list PipeWire sources").set_defaults(func=cmd_list_sources)
+    gate = sub.add_parser(
+        "gate-check",
+        help="watch the gate move on the PTT key, needs no microphone",
+    )
+    gate.add_argument("source", nargs="?", help="source to watch, defaults to the daemon's")
+    gate.add_argument("--timeout", type=float, default=30.0, help="seconds to wait, default 30")
+    gate.set_defaults(func=cmd_gate_check)
     sub.add_parser("teardown", help="unload leftover echo-cancel modules").set_defaults(
         func=cmd_teardown
     )

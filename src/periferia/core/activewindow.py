@@ -205,19 +205,35 @@ def _gdbus(
     return _run(args)
 
 
+_METHODS: set[str] | None = None
+
+
 def scripting_methods() -> set[str]:
-    asked = _run(
-        [
-            "gdbus",
-            "introspect",
-            "--session",
-            "--dest",
-            KWIN_SERVICE,
-            "--object-path",
-            SCRIPTING_PATH,
-        ]
-    )
-    return _parse_methods(asked.stdout)
+    """What the scripting object offers, asked once and briefly.
+
+    This used to inherit the ten second timeout of every other gdbus call, which
+    is most of the probe's whole budget, so a slow introspection looked exactly
+    like a compositor that never answered.
+    """
+    global _METHODS
+    if _METHODS is None:
+        try:
+            asked = _run(
+                [
+                    "gdbus",
+                    "introspect",
+                    "--session",
+                    "--dest",
+                    KWIN_SERVICE,
+                    "--object-path",
+                    SCRIPTING_PATH,
+                ],
+                timeout=2.0,
+            )
+        except subprocess.TimeoutExpired:
+            return set()
+        _METHODS = _parse_methods(asked.stdout) if asked.returncode == 0 else set()
+    return _METHODS
 
 
 def _parse_methods(introspection: str) -> set[str]:
@@ -485,6 +501,7 @@ def probe(
         if started.returncode != 0:
             return _explain(started, "start")
         if "run" in scripting_methods():
+            # absent on KWin 6, where start() already runs what was loaded
             ran = _gdbus(
                 "run",
                 path=f"{SCRIPTING_PATH}/Script{script_id}",

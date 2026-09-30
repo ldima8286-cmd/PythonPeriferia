@@ -250,6 +250,19 @@ class TestExplain:
         assert "not reachable" in report.detail
 
 
+class TestScriptingMethodsIsBounded:
+    def test_introspection_cannot_eat_the_probe_budget(self) -> None:
+        source = pathlib.Path(activewindow.__file__).read_text()
+        body = source[source.index("def scripting_methods") : source.index("def bus_names")]
+        assert "timeout=2.0" in body
+        assert "subprocess.TimeoutExpired" in body
+
+    def test_the_answer_is_asked_only_once(self) -> None:
+        source = pathlib.Path(activewindow.__file__).read_text()
+        body = source[source.index("def scripting_methods") : source.index("def bus_names")]
+        assert "if _METHODS is None" in body
+
+
 class TestScriptingMethods:
     def test_method_names_are_read_out_of_introspection(self) -> None:
         xml = '<node><interface name="org.kde.kwin.Scripting">'

@@ -69,6 +69,8 @@ class VirtualMic:
         self._ramp_thread: threading.Thread | None = None
         self._ramp_cancel: threading.Event | None = None
         self._held = False
+        # Set once a failure has been reported, cleared when one succeeds.
+        self._warned = False
 
     @property
     def source(self) -> str | None:
@@ -113,13 +115,48 @@ class VirtualMic:
         self._volume = max(0.0, min(1.0, volume))
         if not self._source:
             return
-        try:
-            self._slider(self._source, self._volume)
-        except pipewire.PipeWireError as exc:
-            # Once the module is gone the source is gone with it, and saying so
-            # loudly while shutting down only hides failures that matter.
-            level = log.warning if self._held else log.debug
-            level("volume update failed: %s", exc)
+        # A name that stopped resolving is worth one retry. PipeWire renames the
+        # echo-cancel output when the module is reloaded, so the handle captured
+        # at startup can go stale while the source itself is alive and well.
+        for attempt in (0, 1):
+            try:
+                self._slider(self._source, self._volume)
+            except pipewire.PipeWireError as exc:
+                if attempt == 0 and self._reresolve():
+                    continue
+                self._report(exc)
+                return
+            else:
+                if attempt:
+                    log.info("volume is driving %s again", self._source)
+                self._warned = False
+                return
+
+    def _reresolve(self) -> bool:
+        """Look the source up again, and adopt the name it has now.
+
+        The description in the config is the only handle that outlives a
+        reload. Everything else is a name PipeWire generated for itself.
+        """
+        found = pipewire.find_source(self.cfg.virtual_name)
+        if found and found != self._source:
+            log.info("source is now %s, was %s", found, self._source)
+            self._source = found
+            return True
+        return False
+
+    def _report(self, exc: pipewire.PipeWireError) -> None:
+        """Say it once, then keep quiet.
+
+        Every press of the key drove two of these, and a condition that never
+        resolves will not fix itself between presses. Repeating it only pushes
+        the failures that matter out of the journal.
+        """
+        if self._held and not self._warned:
+            log.warning("volume update failed: %s (further attempts go quiet)", exc)
+            self._warned = True
+        else:
+            log.debug("volume update failed: %s", exc)
 
     def ramp(self, target: float, duration_ms: int) -> None:
         """Move to target over duration_ms, cancelling any ramp in flight."""

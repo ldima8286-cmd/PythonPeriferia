@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib
+import logging
 import time
 
 import pytest
@@ -11,6 +12,7 @@ import pytest
 # environment is fixed: the plain form reads better.
 config_mod = importlib.import_module("periferia.core.config")
 audio_mod = importlib.import_module("periferia.modules.audio")
+pipewire_mod = importlib.import_module("periferia.core.pipewire")
 
 AudioConfig = config_mod.AudioConfig
 VirtualMic = audio_mod.VirtualMic
@@ -54,3 +56,83 @@ def test_ramp_thread_finishes() -> None:
     thread.join(timeout=2.0)
     assert not thread.is_alive(), "ramp thread never finished"
     assert mic.volume == pytest.approx(1.0)
+
+
+class TestStaleSourceName:
+    """PipeWire renames the echo-cancel output when the module is reloaded, so
+    the name captured at startup can stop resolving while the source is fine.
+
+    The journal was full of this, twice per press of the key, for hours: the
+    daemon held a name the server no longer knew and kept retrying it forever.
+    """
+
+    @staticmethod
+    def _gone(name: str, fraction: float) -> None:
+        raise pipewire_mod.PipeWireError("Нет такого объекта")
+
+    def test_a_renamed_source_is_picked_up_again(self, monkeypatch):
+        seen: list[tuple[str, float]] = []
+        current = {"name": "echo-cancel-source"}
+
+        def slider(name: str, fraction: float) -> None:
+            if name != current["name"]:
+                raise pipewire_mod.PipeWireError("Нет такого объекта")
+            seen.append((name, fraction))
+
+        monkeypatch.setattr(pipewire_mod, "find_source", lambda d: current["name"])
+        mic = VirtualMic(AudioConfig(), slider=slider)
+        mic.attach("echo-cancel-source")
+        seen.clear()  # attach() zeroes the volume, which is not what is under test
+        current["name"] = "echo-cancel-source-renamed"
+
+        mic._held = True
+        mic._apply(1.0)
+
+        assert seen == [("echo-cancel-source-renamed", 1.0)]
+        assert mic.source == "echo-cancel-source-renamed"
+
+    def test_it_reports_once_for_a_source_that_is_truly_gone(self, monkeypatch, caplog):
+        monkeypatch.setattr(pipewire_mod, "find_source", lambda d: None)
+        mic = VirtualMic(AudioConfig(), slider=self._gone)
+        mic.attach("echo-cancel-source")
+        mic._held = True
+
+        with caplog.at_level(logging.WARNING):
+            for _ in range(20):
+                mic._apply(1.0)
+
+        warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+        assert len(warnings) == 1
+        assert "Нет такого объекта" in warnings[0].message
+
+    def test_recovery_after_a_failure_is_reported_again(self, monkeypatch, caplog):
+        fail = {"now": True}
+
+        def slider(name: str, fraction: float) -> None:
+            if fail["now"]:
+                raise pipewire_mod.PipeWireError("Нет такого объекта")
+
+        monkeypatch.setattr(pipewire_mod, "find_source", lambda d: None)
+        mic = VirtualMic(AudioConfig(), slider=slider)
+        mic.attach("echo-cancel-source")
+        mic._held = True
+
+        with caplog.at_level(logging.WARNING):
+            mic._apply(1.0)
+            fail["now"] = False
+            mic._apply(1.0)
+            fail["now"] = True
+            mic._apply(1.0)
+
+        assert len([r for r in caplog.records if r.levelno == logging.WARNING]) == 2
+
+    def test_stays_quiet_while_the_mic_is_not_held(self, monkeypatch, caplog):
+        monkeypatch.setattr(pipewire_mod, "find_source", lambda d: None)
+        mic = VirtualMic(AudioConfig(), slider=self._gone)
+        mic.attach("echo-cancel-source")
+
+        with caplog.at_level(logging.WARNING):
+            for _ in range(20):
+                mic._apply(1.0)
+
+        assert not [r for r in caplog.records if r.levelno == logging.WARNING]

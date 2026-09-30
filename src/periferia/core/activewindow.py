@@ -420,7 +420,6 @@ def probe(
             )
         first = _summarize(report, script_id)
         if on_report is not None:
-            on_report(first)
             while True:
                 with contextlib.suppress(KeyboardInterrupt):
                     later = service.next_report(timeout=3600.0)

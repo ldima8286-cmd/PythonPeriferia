@@ -30,6 +30,10 @@ CLOSING = "closing"
 LATCHED = "latched"
 PANIC = "panic"
 
+# Every state a note is allowed to hold. Readers compare against this rather
+# than against their own spelling of the words.
+ALL = frozenset({CLOSED, OPEN, CLOSING, LATCHED, PANIC})
+
 
 def state_path() -> Path:
     base = os.environ.get("XDG_RUNTIME_DIR") or os.environ.get("TMPDIR") or "/tmp"
@@ -38,6 +42,13 @@ def state_path() -> Path:
 
 def write(state: str, *, source: str | None, pid: int | None = None) -> None:
     """Record the state. Never raises: the microphone matters more than the note."""
+    if state not in ALL:
+        # A note nobody can interpret is worse than no note. This is what let a
+        # window sit on "not running" for a live microphone: the reader matched
+        # a spelling the writer never produced. Refusing the typo here means a
+        # reader only ever has to understand states that exist.
+        log.warning("refusing to record unknown state %r", state)
+        return
     payload: dict[str, Any] = {
         "state": state,
         "source": source,
@@ -63,6 +74,47 @@ def read() -> dict[str, Any] | None:
     except (OSError, ValueError):
         return None
     return data if isinstance(data, dict) else None
+
+
+def is_running(note: dict[str, Any] | None) -> bool:
+    """Whether the process that wrote the note is still there.
+
+    The note outlives its author. The daemon clears it on a clean exit, but a
+    crash, a kill, or a reboot leaves it behind, and a reader that trusts the
+    file alone will go on reporting whatever the microphone was doing at the
+    moment it died. A window that says the microphone is open on the strength
+    of a note from a dead process is worse than one that says nothing.
+
+    Signal 0 checks for existence without delivering anything. It reports
+    PermissionError for a process that exists under another user, which is
+    still running as far as this question is concerned. A recycled pid will
+    read as alive; that needs a heartbeat to rule out, and the daemon does not
+    write one.
+    """
+    if not note:
+        return False
+    pid = note.get("pid")
+    if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+    return True
+
+
+def age(note: dict[str, Any] | None) -> float | None:
+    """How long ago the note was written, in seconds."""
+    if not note:
+        return None
+    since = note.get("changed_at")
+    if not isinstance(since, (int, float)) or isinstance(since, bool):
+        return None
+    return max(0.0, time.time() - since)
 
 
 def clear() -> None:

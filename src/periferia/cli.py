@@ -214,6 +214,18 @@ def cmd_status(args: argparse.Namespace) -> int:
         print(f"{DIM}no state at {state_mod.state_path()}{DIM}")
         return 1
 
+    if not state_mod.is_running(note):
+        # The note survives its author, so report the corpse rather than the
+        # last thing it managed to say.
+        pid = note.get("pid", "?")
+        when = state_mod.age(note)
+        ago = f" {when:.0f}s ago" if when is not None else ""
+        print(f"{YELLOW}periferia is not running{DIM}")
+        was = note.get("state")
+        print(f"{DIM}it stopped while the microphone was '{was}'{ago} (pid {pid}){DIM}")
+        print(f"{DIM}stale note at {state_mod.state_path()}{DIM}")
+        return 1
+
     now = note.get("state")
     since = note.get("changed_at")
     ago = ""

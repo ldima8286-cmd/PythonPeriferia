@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import argparse
 import logging
 import signal
 import sys
@@ -336,7 +337,32 @@ class Daemon:
 
 
 def main() -> int:
-    cfg = config_mod.load()
+    parser = argparse.ArgumentParser(
+        prog="periferia-daemon",
+        description="Hold a key to open the microphone.",
+    )
+    parser.add_argument("-c", "--config", help="path to config.yaml")
+    args = parser.parse_args()
+
+    # Which file is in force, said out loud. The daemon used to read whatever
+    # load() found and complain about the result, so a config that was never
+    # located looked exactly like a config with the wrong values in it.
+    explicit = Path(args.config) if args.config else None
+    found = config_mod.find_config(explicit)
+    if found is None:
+        log.warning("no config found, running on defaults")
+    else:
+        log.info("config %s", found)
+
+    try:
+        cfg = config_mod.load(explicit)
+    except (OSError, ValueError) as exc:
+        # A path that was asked for by name and cannot be read is a mistake
+        # worth stopping for, not a reason to run on defaults and let the
+        # failure resurface later as a confusing complaint about a key.
+        print(f"periferia-daemon: cannot read the config: {exc}", file=sys.stderr)
+        return 2
+
     logging_setup.setup(cfg.log)
     daemon = Daemon(cfg)
     signal.signal(signal.SIGINT, daemon.stop)

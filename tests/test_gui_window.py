@@ -39,7 +39,7 @@ def test_builds_without_a_config(app, tmp_path):
 
 def test_shows_the_daemon_state(app, tmp_path):
     os.environ["XDG_RUNTIME_DIR"] = str(tmp_path)
-    state_mod.write("LATCHED", source="PeriferiaMic")
+    state_mod.write(state_mod.LATCHED, source="PeriferiaMic")
     window = _window(app, tmp_path, "ptt:\n  ptt_key: KEY_GRAVE\n")
     assert window.banner.title.text() == "Микрофон залип"
 

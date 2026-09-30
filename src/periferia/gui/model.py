@@ -247,26 +247,32 @@ class MicStatus:
     state: str = "unknown"
     source: str = ""
     age: float | None = None
+    # Whether the process that wrote the note is still alive. A note is not
+    # evidence on its own, so this is what separates "closed" from "the daemon
+    # died while it was closed".
+    running: bool = False
 
     @property
     def open(self) -> bool:
-        return self.state in ("OPEN", "CLOSING")
+        return self.state in (state_mod.OPEN, state_mod.CLOSING)
 
     @property
     def latched(self) -> bool:
-        return self.state == "LATCHED"
+        return self.state == state_mod.LATCHED
 
     @property
     def text(self) -> str:
-        if self.state == "OPEN":
+        if not self.running:
+            return "Демон не запущен"
+        if self.state == state_mod.OPEN:
             return "Микрофон открыт"
-        if self.state == "CLOSING":
+        if self.state == state_mod.CLOSING:
             return "Микрофон закрывается"
-        if self.state == "LATCHED":
+        if self.state == state_mod.LATCHED:
             return "Микрофон залип"
-        if self.state == "CLOSED":
+        if self.state == state_mod.CLOSED:
             return "Микрофон закрыт"
-        if self.state == "PANIC":
+        if self.state == state_mod.PANIC:
             return "Паника"
         return "Демон не запущен"
 
@@ -276,6 +282,16 @@ class MicStatus:
             detail += f"   Паника: {panic}"
         if self.age is not None:
             detail += f"   Обновлено {self.age:.0f} с назад"
+        if not self.running and self.state != "unknown":
+            # The note is the only trace of how the process ended, and a panic
+            # that stops mid-word is worth surfacing rather than discarding.
+            last = MicStatus(
+                state=self.state,
+                source=self.source,
+                age=self.age,
+                running=True,
+            ).text
+            detail += f"   Последнее: {last.lower()}"
         return detail
 
 
@@ -284,20 +300,20 @@ def read_status() -> MicStatus:
 
     No socket, no second source of truth, and the window shows the same thing
     `periferia status` prints.
-    """
-    import time
 
+    A note from a process that is no longer running is not a status. It is the
+    last thing that was true, and reporting it as current is how a window ends
+    up telling you the microphone is open when it has been off since the daemon
+    died. The note is kept for the text, but it stops counting as the answer.
+    """
     data = state_mod.read()
     if not data:
         return MicStatus()
-    when = data.get("changed_at")
-    age = None
-    if isinstance(when, (int, float)):
-        age = max(0.0, time.time() - float(when))
     return MicStatus(
         state=str(data.get("state", "unknown")),
         source=str(data.get("source") or ""),
-        age=age,
+        age=state_mod.age(data),
+        running=state_mod.is_running(data),
     )
 
 

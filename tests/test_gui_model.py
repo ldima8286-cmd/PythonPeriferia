@@ -192,14 +192,17 @@ class TestStatus:
         monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path))
         from src.periferia.core import state as state_mod
 
-        state_mod.write("LATCHED", source="PeriferiaMic")
+        # The real constant, not a hand-typed spelling of it. This test used to
+        # write "LATCHED" and check against "LATCHED", which agreed with itself
+        # and with nothing the daemon produces.
+        state_mod.write(state_mod.LATCHED, source="PeriferiaMic")
         status = model.read_status()
-        assert status.state == "LATCHED"
+        assert status.state == state_mod.LATCHED
         assert status.latched
         assert not status.open
 
     @pytest.mark.parametrize(
-        ("state", "opened", "text"),
+        ("constant", "opened", "text"),
         [
             ("OPEN", True, "Микрофон открыт"),
             ("CLOSED", False, "Микрофон закрыт"),
@@ -208,11 +211,11 @@ class TestStatus:
             ("PANIC", False, "Паника"),
         ],
     )
-    def test_wording_per_state(self, tmp_path, monkeypatch, state, opened, text):
+    def test_wording_per_state(self, tmp_path, monkeypatch, constant, opened, text):
         monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path))
         from src.periferia.core import state as state_mod
 
-        state_mod.write(state, source="PeriferiaMic")
+        state_mod.write(getattr(state_mod, constant), source="PeriferiaMic")
         status = model.read_status()
         assert status.open is opened
         assert status.text == text
@@ -225,7 +228,7 @@ class TestStatus:
         monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path))
         from src.periferia.core import state as state_mod
 
-        state_mod.write("OPEN", source="PeriferiaMic")
+        state_mod.write(state_mod.OPEN, source="PeriferiaMic")
         assert model.read_status().age is not None
 
 
@@ -292,3 +295,45 @@ class TestFormatting:
         path.write_text('ptt:\n  ptt_key: "KEY_GRAVE"\n', encoding="utf-8")
         model.save_profiles(path, [("KEY_A", "KEY_B")], "game")
         assert '"KEY_GRAVE"' in path.read_text()
+
+
+class TestStatusAgainstRealStateConstants:
+    """The daemon writes lowercase constants, so the window has to read those.
+
+    The window used to compare against its own uppercase spellings, which
+    matched nothing the daemon ever wrote. Every state fell through to
+    "not running", so a live microphone reported as a dead daemon.
+    """
+
+    def test_every_daemon_state_is_recognised(self):
+        from src.periferia.core import state
+
+        names = {
+            state.OPEN: "Микрофон открыт",
+            state.CLOSING: "Микрофон закрывается",
+            state.LATCHED: "Микрофон залип",
+            state.CLOSED: "Микрофон закрыт",
+            state.PANIC: "Паника",
+        }
+        for written, expected in names.items():
+            got = model.MicStatus(state=written, running=True).text
+            assert got == expected, f"{written!r} gave {got!r}"
+
+    def test_state_strings_are_the_ones_the_daemon_writes(self):
+        from src.periferia.core import state
+
+        for written in (state.OPEN, state.LATCHED, state.PANIC):
+            assert written == written.lower()
+
+    def test_open_follows_the_constants(self):
+        from src.periferia.core import state
+
+        assert model.MicStatus(state=state.OPEN).open
+        assert model.MicStatus(state=state.CLOSING).open
+        assert not model.MicStatus(state=state.CLOSED).open
+
+    def test_latched_follows_the_constants(self):
+        from src.periferia.core import state
+
+        assert model.MicStatus(state=state.LATCHED).latched
+        assert not model.MicStatus(state=state.CLOSED).latched

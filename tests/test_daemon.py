@@ -11,6 +11,8 @@ level never moves, no matter what key is pressed.
 from __future__ import annotations
 
 import importlib
+import logging
+import sys
 import time
 from typing import Any
 
@@ -323,3 +325,73 @@ def test_forcing_a_release_also_unlatches(
 
     daemon.force_release("test")
     assert daemon._latched is False
+
+
+class TestEntryPoint:
+    """`periferia-daemon -c` used to be ignored, because the entry point took
+    no arguments at all. A config that was never read then looked like a config
+    with wrong values in it."""
+
+    def test_missing_named_config_stops_with_a_readable_error(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        from src.periferia.core import daemon as daemon_mod
+
+        monkeypatch.setattr(
+            daemon_mod, "Daemon", _should_not_start
+        )
+        monkeypatch.setattr(sys, "argv", ["periferia-daemon", "-c", str(tmp_path / "no.yaml")])
+        assert daemon_mod.main() == 2
+        assert "cannot read the config" in capsys.readouterr().err
+
+    def test_it_reads_the_config_it_was_pointed_at(
+        self, tmp_path, monkeypatch, caplog
+    ):
+        from src.periferia.core import daemon as daemon_mod
+
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text("ptt:\n  ptt_key: KEY_GRAVE\n")
+        seen: list[object] = []
+        monkeypatch.setattr(daemon_mod, "Daemon", lambda cfg: seen.append(cfg) or _Stub())
+        monkeypatch.setattr(sys, "argv", ["periferia-daemon", "-c", str(cfg)])
+        assert daemon_mod.main() == 0
+        assert seen[0].ptt.ptt_key == "KEY_GRAVE"
+
+    def test_a_config_it_cannot_find_is_announced(
+        self, tmp_path, monkeypatch, caplog
+    ):
+        from src.periferia.core import daemon as daemon_mod
+
+        monkeypatch.setattr(daemon_mod, "Daemon", lambda cfg: _Stub())
+        monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "empty"))
+        monkeypatch.setattr(sys, "argv", ["periferia-daemon"])
+        with caplog.at_level(logging.WARNING):
+            daemon_mod.main()
+        assert any("no config found" in r.message for r in caplog.records)
+
+    def test_the_config_in_force_is_named(
+        self, tmp_path, monkeypatch, caplog
+    ):
+        from src.periferia.core import daemon as daemon_mod
+
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text("ptt:\n  ptt_key: KEY_F12\n")
+        monkeypatch.setattr(daemon_mod, "Daemon", lambda cfg: _Stub())
+        monkeypatch.setattr(sys, "argv", ["periferia-daemon", "-c", str(cfg)])
+        with caplog.at_level(logging.INFO):
+            daemon_mod.main()
+        assert any(str(cfg) in r.message for r in caplog.records)
+
+
+class _Stub:
+    """Just enough daemon for the entry point to install handlers and return."""
+
+    def run(self) -> int:
+        return 0
+
+    def stop(self, *_: object) -> None:
+        pass
+
+
+def _should_not_start(cfg: object) -> _Stub:
+    raise AssertionError("the daemon must not start on an unreadable config")

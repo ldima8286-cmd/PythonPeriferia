@@ -10,9 +10,11 @@ from __future__ import annotations
 
 import pathlib
 import subprocess
+from unittest import mock
 
 import pytest
 
+from periferia import cli
 from periferia.core import activewindow, envcheck, windowbus
 
 
@@ -219,13 +221,37 @@ class TestScriptNameIsNotShared:
         source = pathlib.Path(activewindow.__file__).read_text()
         assert 'f"{SCRIPT_NAME}{os.getpid()}"' in source
         unload_after_load = source.index('loaded = _gdbus("loadScript"')
-        assert source.rindex('_gdbus("unloadScript", name)') > unload_after_load
+        assert source.rindex('unloadScript", name') > unload_after_load
 
     def test_the_script_is_unloaded_even_on_an_early_exit(self) -> None:
         source = pathlib.Path(activewindow.__file__).read_text()
         body = source[source.index("def probe(") : source.index("def cleanup(")]
         finally_block = body[body.index("finally:") :]
-        assert '_gdbus("unloadScript", name)' in finally_block
+        assert 'unloadScript", name' in finally_block
+
+
+class TestProbeNeverDiesQuietly:
+    def test_a_hanging_call_is_reported_not_raised(self) -> None:
+        import subprocess
+
+        def hang(args, timeout=10.0, **kw):
+            raise subprocess.TimeoutExpired(args, timeout)
+
+        with mock.patch.object(activewindow, "_run", hang), mock.patch.object(
+            activewindow, "inspect_bus", lambda: activewindow.BusReport("", False, True, "ok")
+        ), mock.patch.object(activewindow.windowbus, "HAVE_DBUS", True), mock.patch.object(
+            activewindow, "shutil_which", lambda _: "/usr/bin/gdbus"
+        ), mock.patch.object(
+            activewindow.windowbus.WindowService, "start", lambda self: True
+        ):
+            report = activewindow.probe(timeout=0.1)
+        assert report.status == envcheck.FAIL
+        assert "in time" in report.detail
+
+    def test_watching_nothing_says_so(self) -> None:
+        source = pathlib.Path(cli.__file__).read_text()
+        body = source[source.index("def cmd_probe_window") :]
+        assert "nothing came back, so there is nothing to watch" in body
 
 
 class TestExplain:

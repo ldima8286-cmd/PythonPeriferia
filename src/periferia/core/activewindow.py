@@ -189,6 +189,7 @@ def _gdbus(
     path: str = SCRIPTING_PATH,
     interface: str = SCRIPTING_IFACE,
     service: str = KWIN_SERVICE,
+    timeout: float = 10.0,
 ) -> subprocess.CompletedProcess[str]:
     args = [
         "gdbus",
@@ -202,7 +203,7 @@ def _gdbus(
         f"{interface}.{method}",
         *arguments,
     ]
-    return _run(args)
+    return _run(args, timeout=timeout)
 
 
 _METHODS: set[str] | None = None
@@ -455,6 +456,7 @@ def probe(
     name = f"{SCRIPT_NAME}{os.getpid()}"
     handle, path = tempfile.mkstemp(prefix="periferia-kwin-probe-", suffix=".js")
     try:
+      try:
         if not service.start():
             return WindowReport(
                 FAIL,
@@ -548,8 +550,24 @@ def probe(
                         break
                     on_report(_summarize(later, script_id))
         return first
+      except subprocess.TimeoutExpired as expired:
+          return WindowReport(
+              FAIL,
+              "KWin did not answer in time",
+              f"the call that hung was {' '.join(str(x) for x in expired.cmd[-3:])}",
+              script_name=name,
+          )
+      except Exception as boom:  # a diagnostic that dies quietly helps nobody
+          return WindowReport(
+              FAIL,
+              f"the probe broke: {type(boom).__name__}",
+              f"{boom}",
+              script_name=name,
+          )
     finally:
-        _gdbus("unloadScript", name)
+        # teardown that raises would mask whatever the probe was going to say
+        with contextlib.suppress(Exception):
+            _gdbus("unloadScript", name, timeout=2.0)
         with contextlib.suppress(OSError):
             os.unlink(path)
         service.stop()

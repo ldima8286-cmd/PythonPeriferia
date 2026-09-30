@@ -183,6 +183,13 @@ def cmd_probe_window(args: argparse.Namespace) -> int:
             f" means the\n  terminal is what was active. To see any other window,"
             f" use --watch\n  and switch while it runs.{RESET}"
         )
+    if args.watch and not report.interesting():
+        print(
+            f"\n  {YELLOW}nothing came back, so there is nothing to watch.{RESET}"
+            f"\n  {DIM}Fix the failure above first; watching an absent window only"
+            f" waits forever.{RESET}"
+        )
+        return 1
     if args.watch:
         print(f"\n  {DIM}watching, switch windows, Ctrl-C to stop{RESET}", flush=True)
         with contextlib.suppress(KeyboardInterrupt):

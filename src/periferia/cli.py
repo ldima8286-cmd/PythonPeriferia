@@ -147,6 +147,10 @@ def cmd_probe_window(args: argparse.Namespace) -> int:
         if not later.interesting():
             print(f"  {DIM}(nothing usable){RESET}")
 
+    print(
+        f"  {DIM}asking KWin, up to {args.timeout:.0f}s...{RESET}",
+        flush=True,
+    )
     report = activewindow.probe(
         timeout=args.timeout, on_report=show if args.watch else None
     )
@@ -180,10 +184,18 @@ def cmd_probe_window(args: argparse.Namespace) -> int:
             f" use --watch\n  and switch while it runs.{RESET}"
         )
     if args.watch:
-        print(f"\n  {DIM}watching, switch windows, Ctrl-C to stop{RESET}")
+        print(f"\n  {DIM}watching, switch windows, Ctrl-C to stop{RESET}", flush=True)
         with contextlib.suppress(KeyboardInterrupt):
+            waited = 0
             while True:
                 time.sleep(1)
+                waited += 1
+                if waited % 15 == 0:
+                    print(
+                        f"  {DIM}still alive after {waited}s, nothing has changed"
+                        f" focus{RESET}",
+                        flush=True,
+                    )
     activewindow.cleanup(report.script_id)
     return 0 if report.status == envcheck.OK else 1
 

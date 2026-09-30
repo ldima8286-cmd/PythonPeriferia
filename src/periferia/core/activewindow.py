@@ -17,11 +17,16 @@ import contextlib
 import json
 import os
 import re
+import select
+import shutil
 import subprocess
+import sys
 import tempfile
 import time
 from dataclasses import dataclass, field
+from pathlib import Path
 
+from ._window_receiver import BUS_NAME, INTERFACE, OBJECT_PATH
 from .envcheck import FAIL, OK, WARN
 
 MARKER = "IRONINPUT-WINDOW-PROBE"
@@ -34,7 +39,7 @@ SCRIPTING_IFACE = "org.kde.kwin.Scripting"
 SCRIPT_IFACE = "org.kde.kwin.Script"
 
 SCRIPT = """
-var reported = false;
+var sent = false;
 
 function field(client, name) {
     try {
@@ -48,11 +53,11 @@ function field(client, name) {
     }
 }
 
-function report() {
-    if (reported) {
+function send() {
+    if (sent) {
         return;
     }
-    reported = true;
+    sent = true;
     var client = null;
     try {
         client = workspace.activeClient;
@@ -67,31 +72,29 @@ function report() {
         }
     }
     if (client === null) {
-        print("%(marker)s " + JSON.stringify({"error": "no active client"}));
+        callDBus(
+            "%(bus)s", "%(path)s", "%(iface)s", "Report",
+            JSON.stringify({"error": "no active client"})
+        );
         return;
     }
-    print("%(marker)s " + JSON.stringify({
+    var data = JSON.stringify({
         "caption": field(client, "caption"),
         "resourceClass": field(client, "resourceClass"),
         "resourceName": field(client, "resourceName"),
         "windowRole": field(client, "windowRole"),
         "desktopFile": field(client, "desktopFile"),
-        "internalId": field(client, "internalId"),
-        "workspaceCount": (function () {
-            try {
-                return workspace.workspaces.length;
-            } catch (error) {
-                return null;
-            }
-        })()
-    }));
+        "internalId": field(client, "internalId")
+    });
+    callDBus("%(bus)s", "%(path)s", "%(iface)s", "Report", data);
 }
 
-report();
+send();
 
 try {
     workspace.clientActivated.connect(function () {
-        print("%(marker)s " + JSON.stringify({"event": "clientActivated"}));
+        sent = false;
+        send();
     });
 } catch (error) {
 }
@@ -287,6 +290,103 @@ def _parse_marker(text: str) -> dict | None:
     return None
 
 
+RECEIVER = Path(__file__).with_name("_window_receiver.py")
+
+GI_CHECK = (
+    "import gi; gi.require_version('Gio','2.0');"
+    "from gi.repository import Gio, GLib; print('ok')"
+)
+
+
+@dataclass(slots=True)
+class Receiver:
+    interpreter: str
+    process: subprocess.Popen[str] | None = None
+    note: str = ""
+    error: str = ""
+
+    def stop(self) -> None:
+        if self.process is None:
+            return
+        with contextlib.suppress(Exception):
+            self.process.terminate()
+            self.process.wait(timeout=3)
+
+
+def find_interpreter() -> Receiver:
+    tried: list[str] = []
+    for candidate in (sys.executable, "/usr/bin/python3", "/usr/bin/python3.13", "python3"):
+        resolved = shutil.which(candidate) if not os.path.isabs(candidate) else candidate
+        if not resolved or resolved in tried:
+            continue
+        tried.append(resolved)
+        if not os.path.exists(resolved):
+            continue
+        out = _run([resolved, "-c", GI_CHECK], timeout=20.0)
+        if out.returncode == 0 and "ok" in out.stdout:
+            return Receiver(resolved, note="")
+        detail = (out.stderr or out.stdout).strip().splitlines()
+        return Receiver(
+            resolved,
+            error=f"{resolved}: {detail[-1] if detail else 'PyGObject check failed'}",
+        )
+    return Receiver("", error="no interpreter with PyGObject was found")
+
+
+def start_receiver(found: Receiver) -> WindowReport | None:
+    process = subprocess.Popen(
+        [found.interpreter, str(RECEIVER)],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        bufsize=1,
+    )
+    found.process = process
+    assert process.stdout is not None
+    line = process.stdout.readline()
+    if not line:
+        return WindowReport(FAIL, "the receiver exited before it was ready", found.error)
+    try:
+        first = json.loads(line)
+    except json.JSONDecodeError:
+        return WindowReport(FAIL, "the receiver printed something unexpected", line.strip()[:120])
+    if not first.get("ready"):
+        return WindowReport(
+            FAIL,
+            "the receiver could not take a name on the bus",
+            str(first.get("error", "")) + f"\n{_gi_hint()}",
+        )
+    return None
+
+
+def _gi_hint() -> str:
+    return (
+        "install the system PyGObject, then run this from a terminal, not a Flatpak: "
+        "dnf install python3-gobject  (on Bazzite: rpm-ostree install python3-gobject, "
+        "or use the discover/layer tooling your image provides)"
+    )
+
+
+def _read_report(process: subprocess.Popen[str], timeout: float) -> dict | None:
+    assert process.stdout is not None
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        ready, _, _ = select.select([process.stdout], [], [], 0.25)
+        if not ready:
+            continue
+        line = process.stdout.readline()
+        if not line:
+            return None
+        try:
+            parsed = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(parsed, dict) and "report" in parsed:
+            report = parsed["report"]
+            return report if isinstance(report, dict) else None
+    return None
+
+
 def probe(timeout: float = 12.0) -> WindowReport:
     bus = inspect_bus()
     if bus.is_flatpak_proxy and not bus.has_real_socket:
@@ -300,25 +400,47 @@ def probe(timeout: float = 12.0) -> WindowReport:
         return WindowReport(FAIL, "gdbus is not installed", "install glib2 tools")
 
     since = f"-{int(timeout) + 5} seconds"
+    found = find_interpreter()
+    if found.error:
+        return WindowReport(
+            FAIL,
+            "no usable PyGObject, so the compositor has nowhere to report to",
+            f"{found.error}\n{_gi_hint()}",
+        )
+
+    receiver = start_receiver(found)
     handle, path = tempfile.mkstemp(prefix="periferia-kwin-probe-", suffix=".js")
     try:
+        if receiver is not None:
+            return receiver
         with os.fdopen(handle, "w") as stream:
-            stream.write(SCRIPT % {"marker": MARKER})
+            stream.write(
+                SCRIPT
+                % {
+                    "marker": MARKER,
+                    "bus": BUS_NAME,
+                    "path": OBJECT_PATH,
+                    "iface": INTERFACE,
+                }
+            )
         loaded = _gdbus("loadScript", path, SCRIPT_NAME)
         if loaded.returncode != 0:
             return _explain(loaded)
         script_id = _parse_int(loaded.stdout)
         _gdbus("start")
         if script_id is not None:
-            _gdbus("run", path=f"{SCRIPTING_PATH}/Script{script_id}", interface=SCRIPT_IFACE)
-        time.sleep(1.5)
-        report = _parse_marker(_kwin_log(since))
+            _gdbus(
+                "run",
+                path=f"{SCRIPTING_PATH}/Script{script_id}",
+                interface=SCRIPT_IFACE,
+            )
+        assert found.process is not None
+        report = _read_report(found.process, timeout)
         if report is None:
-            found = "\n".join(diagnose(since))
             return WindowReport(
                 WARN,
-                "KWin took the script but its output was not found",
-                found,
+                "KWin took the script, but nothing came back over the bus",
+                "\n".join(diagnose(since)),
                 script_id=script_id,
             )
         if report.get("error"):
@@ -328,16 +450,18 @@ def probe(timeout: float = 12.0) -> WindowReport:
                 "the compositor is alive but exposed no active client",
                 script_id=script_id,
             )
-        detail = "KWin named the active window"
         status = OK
+        detail = "KWin named the active window"
         if not any(report.get(key) for key in ("resourceClass", "resourceName")):
             status = WARN
             detail = "KWin named the window but exposed no stable identifier"
         return WindowReport(
             status,
             detail,
-            "caption changes with the window contents, so it cannot be what a profile "
-            "matches on" if status == OK else "",
+            "caption changes with the window contents, so it cannot be what a "
+            "profile matches on"
+            if status == OK
+            else "",
             caption=report.get("caption"),
             resource_class=report.get("resourceClass"),
             resource_name=report.get("resourceName"),
@@ -348,6 +472,7 @@ def probe(timeout: float = 12.0) -> WindowReport:
     finally:
         with contextlib.suppress(OSError):
             os.unlink(path)
+        found.stop()
 
 
 def cleanup(script_id: int | None) -> None:

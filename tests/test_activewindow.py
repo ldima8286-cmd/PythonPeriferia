@@ -173,14 +173,35 @@ class TestBusNames:
         assert activewindow.bus_names() == []
 
 
+def _render() -> str:
+    from periferia.core._window_receiver import BUS_NAME, INTERFACE, OBJECT_PATH
+
+    return activewindow.SCRIPT % {
+        "marker": activewindow.MARKER,
+        "bus": BUS_NAME,
+        "path": OBJECT_PATH,
+        "iface": INTERFACE,
+    }
+
+
 class TestScript:
     def test_script_is_valid_after_substitution(self) -> None:
-        rendered = activewindow.SCRIPT % {"marker": activewindow.MARKER}
-        assert activewindow.MARKER in rendered
-        assert "%(marker)s" not in rendered
+        rendered = _render()
+        from periferia.core._window_receiver import BUS_NAME, OBJECT_PATH
+
+        assert BUS_NAME in rendered
+        assert OBJECT_PATH in rendered
         assert rendered.count("{") == rendered.count("}")
 
     def test_tries_both_kwin_generations(self) -> None:
-        rendered = activewindow.SCRIPT % {"marker": activewindow.MARKER}
+        rendered = _render()
         assert "activeClient" in rendered
         assert "activeWindow" in rendered
+
+    def test_reports_over_the_bus_not_the_log(self) -> None:
+        rendered = _render()
+        assert "callDBus" in rendered
+        assert "print(" not in rendered
+
+    def test_no_unsubstituted_placeholders(self) -> None:
+        assert "%(" not in _render()

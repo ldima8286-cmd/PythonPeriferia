@@ -173,6 +173,12 @@ def cmd_probe_window(args: argparse.Namespace) -> int:
         print(f"\n  a profile could match on: {_c(', '.join(matchable), GREEN)}")
     elif report.fields:
         print(f"\n  {YELLOW}no field a profile could match on{RESET}")
+    if not args.watch:
+        print(
+            f"\n  {DIM}this is one instant, and running a command from a terminal"
+            f" means the\n  terminal is what was active. To see any other window,"
+            f" use --watch\n  and switch while it runs.{RESET}"
+        )
     if args.watch:
         print(f"\n  {DIM}watching, switch windows, Ctrl-C to stop{RESET}")
         with contextlib.suppress(KeyboardInterrupt):

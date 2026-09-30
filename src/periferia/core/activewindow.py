@@ -314,23 +314,32 @@ class Receiver:
 
 
 def find_interpreter() -> Receiver:
+    failures: list[str] = []
     tried: list[str] = []
-    for candidate in (sys.executable, "/usr/bin/python3", "/usr/bin/python3.13", "python3"):
+    for candidate in (
+        sys.executable,
+        "/usr/bin/python3",
+        "/usr/bin/python3.13",
+        "python3",
+    ):
         resolved = shutil.which(candidate) if not os.path.isabs(candidate) else candidate
         if not resolved or resolved in tried:
             continue
         tried.append(resolved)
         if not os.path.exists(resolved):
+            failures.append(f"{resolved}: not present")
             continue
-        out = _run([resolved, "-c", GI_CHECK], timeout=20.0)
+        out = _run([resolved, "-c", GI_CHECK], timeout=25.0)
         if out.returncode == 0 and "ok" in out.stdout:
             return Receiver(resolved, note="")
         detail = (out.stderr or out.stdout).strip().splitlines()
-        return Receiver(
-            resolved,
-            error=f"{resolved}: {detail[-1] if detail else 'PyGObject check failed'}",
+        failures.append(
+            f"{resolved}: {detail[-1] if detail else 'PyGObject check failed'}"
         )
-    return Receiver("", error="no interpreter with PyGObject was found")
+    if not tried:
+        return Receiver("", error="no python interpreter was found at all")
+    listed = "\n".join(failures)
+    return Receiver("", error=f"no interpreter has PyGObject:\n{listed}")
 
 
 def start_receiver(found: Receiver) -> WindowReport | None:

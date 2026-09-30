@@ -324,11 +324,19 @@ Window tracking on Wayland is the hard part of input profiles: compositors do
 not hand that out freely. Worth checking before investing in that module.
 
 Stereo to mono is listed in the original notes as a fix for phasing on a mono
-jack, and it is not implemented: this PipeWire has no `module-filter-chain`, so
-there is nothing to build the conversion out of. It is also not clear the
-problem exists. A card that duplicates one mono input into both channels needs
-no downmix, and no one has measured whether these two channels actually differ.
-Recording a second and comparing the two channels settles it.
+jack. It is not implemented, and the reason was misdiagnosed once already:
+`pactl load-module module-filter-chain` fails with "no such object", but that
+does not mean the module is missing. `libpipewire-module-filter-chain.so` is
+present in the ostree image, and `pactl list short modules` only ever lists
+loaded modules, so its absence from that list proved nothing. The load still
+fails, and the reason is not yet known, so treat this as unresolved rather than
+as impossible. filter-chain would also be the natural host for a compressor, so
+it is worth one more look from a real shell.
+
+It is also not established that the problem exists. A card that duplicates one
+mono input into both channels needs no downmix, and no one has measured whether
+these two channels actually differ. Recording a second and comparing the two
+channels settles that.
 
 ## License
 

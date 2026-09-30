@@ -20,13 +20,9 @@ from ..modules.hotkey import (
 from ..modules.processing import MicProcessing
 from . import config as config_mod
 from . import logging_setup
+from . import state as state_mod
 
 log = logging.getLogger(__name__)
-
-TRAY_CLOSED = 1
-TRAY_OPEN = 2
-TRAY_PANIC = 3
-
 
 class Daemon:
     def __init__(self, cfg: config_mod.Config) -> None:
@@ -90,6 +86,7 @@ class Daemon:
 
         if self.cfg.audio.start_muted:
             self.mic.force_silence()
+        state_mod.write(state_mod.CLOSED, source=self.mic.source)
 
         if not self._setup_hotkey():
             log.error("could not set up the hotkey, microphone stays closed")
@@ -142,6 +139,7 @@ class Daemon:
         self._release_at = None
         self._pressed_at = self._record("press")
         self.mic.open_mic()
+        state_mod.write(state_mod.OPEN, source=self.mic.source)
 
     def on_release(self) -> None:
         # logging this too: with only the press side visible, a listener that
@@ -152,12 +150,15 @@ class Daemon:
         self._pressed_at = None
         hold = max(0, self.cfg.audio.hold_ms) / 1000.0
         self._release_at = time.monotonic() + hold
+        # still open until the hold runs out, so the note says closing
+        state_mod.write(state_mod.CLOSING, source=self.mic.source)
 
     def on_panic(self) -> None:
         log.warning("panic pressed")
         self._record("panic")
         self._release_at = None
         self.mic.panic()
+        state_mod.write(state_mod.PANIC, source=self.mic.source)
         # Stamp the real end of the panic, not a level the TUI polls later.
         # A polled bar cannot resolve this below its own refresh interval,
         # which is coarse enough to hide a correct panic behind a slow sample.
@@ -177,6 +178,7 @@ class Daemon:
         if self._listener is not None:
             self._listener.reset_state()
         self.mic.force_silence()
+        state_mod.write(state_mod.CLOSED, source=self.mic.source)
 
     def _expire_stuck_hold(self) -> None:
         """Last resort if a press never gets a matching release.
@@ -199,6 +201,7 @@ class Daemon:
         if time.monotonic() >= self._release_at:
             self._release_at = None
             self.mic.close_mic()
+            state_mod.write(state_mod.CLOSED, source=self.mic.source)
 
     def run(self) -> int:
         if not self.setup():
@@ -237,6 +240,7 @@ class Daemon:
             if opened:
                 listener.close()
             self.mic.force_silence()
+            state_mod.write(state_mod.CLOSED, source=self.mic.source)
             self.processing.stop()
             self.mic.teardown()
         return 0

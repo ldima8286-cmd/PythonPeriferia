@@ -18,9 +18,31 @@ than any one application.
 - `processing` — turns on PipeWire's own RNNoise noise suppression, echo
   cancellation and voice detection. These are module properties, not DSP
   written here.
-- `cli` — environment check, device listing, key picker, manual volume ramp.
+- `cli` — environment check, device listing, key picker, manual volume ramp,
+  and a `status` that reports whether the microphone is open.
 
 Not built yet: tray icon, input profiles, RGB, GUI. See "Roadmap".
+
+### Knowing whether the microphone is open
+
+`periferia status` prints the current state, the source and the daemon pid:
+
+```
+$ periferia status
+microphone OPEN, 0.4s ago
+source        echo-cancel-source
+daemon pid    1234
+```
+
+The daemon writes this to `$XDG_RUNTIME_DIR/periferia/state.json` whenever the
+microphone changes, which is where any future tray icon would read it too. It
+is runtime state, not a setting, so it lives in the runtime directory and is
+meaningless the moment the daemon is gone.
+
+There is deliberately no tray icon yet. A Qt tray is roughly 80 MB of
+dependencies for one dot in the corner, and the only thing it would show is
+what `periferia status` already prints. If a real indicator is wanted later,
+this file is the interface to build it on.
 
 ## Install
 
@@ -128,6 +150,7 @@ reads the keyboard, it never grabs it, so your typing keeps working normally.
 | `periferia ramp` | manual volume ramp, to check for clicks before PTT works |
 | `periferia set-default` | point the default source at the virtual mic |
 | `periferia teardown` | unload echo-cancel modules left behind by a crash |
+| `periferia status` | say whether the microphone is live right now |
 | `periferia config` | show the config actually in effect |
 | `periferia install-service` | install the systemd user unit |
 
@@ -146,6 +169,7 @@ reads the keyboard, it never grabs it, so your typing keeps working normally.
 | `ptt.device` | auto | which keyboards to watch, see below |
 | `ptt.panic_key` | KEY_F12 | instant mute, ignores `hold_ms` |
 | `ptt.max_press_ms` | 300000 | cut off a key held longer than this, 0 disables |
+| `processing.voice_detect` | true | cuts silence between phrases, turn it off if quiet words get lost |
 
 ## Safety
 
@@ -278,7 +302,8 @@ reports on this.
 
 ## Roadmap
 
-- [ ] tray icon and overlay indicator
+- [ ] tray icon and overlay indicator, reading the state file `periferia status` uses
+- [ ] stereo to mono, if it turns out the two channels really differ
 - [ ] GUI for the config
 - [ ] input profiles: remap, DPI, disable keys, per-window switching
 - [ ] RGB control with scripts and time-of-day profiles
@@ -288,6 +313,13 @@ reports on this.
 
 Window tracking on Wayland is the hard part of input profiles: compositors do
 not hand that out freely. Worth checking before investing in that module.
+
+Stereo to mono is listed in the original notes as a fix for phasing on a mono
+jack, and it is not implemented: this PipeWire has no `module-filter-chain`, so
+there is nothing to build the conversion out of. It is also not clear the
+problem exists. A card that duplicates one mono input into both channels needs
+no downmix, and no one has measured whether these two channels actually differ.
+Recording a second and comparing the two channels settles it.
 
 ## License
 

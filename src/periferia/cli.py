@@ -15,6 +15,7 @@ from typing import Any
 
 from .core import config as config_mod
 from .core import envcheck, pipewire
+from .core import state as state_mod
 from .modules import audio as audio_mod
 from .modules import hotkey
 
@@ -199,6 +200,40 @@ def cmd_teardown(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_status(args: argparse.Namespace) -> int:
+    """Say whether the microphone is live, without drawing a tray icon.
+
+    The roadmap asks for a tray that shows an open microphone. A Qt tray is
+    about 80 MB of dependencies for one dot, so the daemon leaves a note
+    instead and this prints it. Anything that wants the same information can
+    read the same file.
+    """
+    note = state_mod.read()
+    if note is None:
+        print(f"{DIM}periferia is not running{DIM}")
+        print(f"{DIM}no state at {state_mod.state_path()}{DIM}")
+        return 1
+
+    now = note.get("state")
+    since = note.get("changed_at")
+    ago = ""
+    if isinstance(since, (int, float)):
+        ago = f", {max(0.0, time.time() - since):.1f}s ago"
+
+    if now == state_mod.OPEN:
+        colour, word = GREEN, "OPEN"
+    elif now == state_mod.CLOSING:
+        colour, word = YELLOW, "closing"
+    elif now == state_mod.PANIC:
+        colour, word = YELLOW, "panic"
+    else:
+        colour, word = DIM, "closed"
+    print(f"microphone {_c(word, colour)}{ago}")
+    print(f"source        {note.get('source') or 'unknown'}")
+    print(f"daemon pid    {note.get('pid', '?')}")
+    return 0
+
+
 def cmd_tui(args: argparse.Namespace) -> int:
     from .tui import run
 
@@ -339,6 +374,9 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("sources", help="list PipeWire sources").set_defaults(func=cmd_list_sources)
     sub.add_parser("teardown", help="unload leftover echo-cancel modules").set_defaults(
         func=cmd_teardown
+    )
+    sub.add_parser("status", help="show whether the microphone is live").set_defaults(
+        func=cmd_status
     )
     sub.add_parser("init-config", help="write a starter config").set_defaults(func=cmd_init)
 

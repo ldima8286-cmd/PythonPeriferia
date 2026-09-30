@@ -63,18 +63,9 @@ class ProcessingConfig:
 
     noise_suppression: bool = True
     echo_cancellation: bool = True
-    voice_detect: bool = False
+    voice_detect: bool = True
     tail_length_ms: int = 200
     extra_props: dict[str, str] = dataclasses.field(default_factory=dict)
-
-    enabled: bool = True
-
-
-@dataclasses.dataclass(slots=True)
-class TrayConfig:
-    show: bool = True
-    overlay: bool = False
-    overlay_corner: str = "top-right"
 
     enabled: bool = True
 
@@ -102,7 +93,6 @@ class Config:
     audio: AudioConfig = dataclasses.field(default_factory=AudioConfig)
     ptt: PttConfig = dataclasses.field(default_factory=PttConfig)
     processing: ProcessingConfig = dataclasses.field(default_factory=ProcessingConfig)
-    tray: TrayConfig = dataclasses.field(default_factory=TrayConfig)
     log: LogConfig = dataclasses.field(default_factory=LogConfig)
     path: Path | None = None
 
@@ -111,7 +101,6 @@ class Config:
             "audio": _unbox(self.audio),
             "ptt": _unbox(self.ptt),
             "processing": _unbox(self.processing),
-            "tray": _unbox(self.tray),
             "log": _unbox(self.log),
         }
 
@@ -160,7 +149,6 @@ def load(explicit: str | Path | None = None) -> Config:
         audio=_build(AudioConfig, data.get("audio")),
         ptt=_build(PttConfig, data.get("ptt")),
         processing=_build(ProcessingConfig, data.get("processing")),
-        tray=_build(TrayConfig, data.get("tray")),
         log=_build(LogConfig, data.get("log")),
         path=path,
     )

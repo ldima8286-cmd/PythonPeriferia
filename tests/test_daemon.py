@@ -16,6 +16,7 @@ from typing import Any
 import pytest
 
 from src.periferia.core import config as config_mod
+from src.periferia.core import state as state_mod
 
 daemon_mod = importlib.import_module("periferia.core.daemon")
 Daemon = daemon_mod.Daemon
@@ -149,3 +150,50 @@ def test_events_ignore_what_happened_before_the_caller_looked() -> None:
     assert daemon.events("panic", since=marked - 1.0) == [marked]
     assert daemon.events("panic", since=marked + 1.0) == []
     assert daemon.events("release", since=0.0) == []
+
+
+@pytest.mark.parametrize(
+    "event,expected",
+    [
+        ("press", state_mod.OPEN),
+        ("release", state_mod.CLOSING),
+        ("panic", state_mod.PANIC),
+    ],
+)
+def test_the_state_note_follows_the_microphone(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: object, event: str, expected: str
+) -> None:
+    # `periferia status` and any future tray read this file. If it drifts from
+    # what the microphone is doing, it will report a closed mic while it is
+    # live, which is the one thing an indicator must never do.
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path))
+    daemon = _daemon(_Listener())
+
+    getattr(daemon, f"on_{event}")()
+    note = state_mod.read()
+    assert note is not None
+    assert note["state"] == expected
+
+
+def test_the_hold_running_out_is_what_closes_the_mic(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: object
+) -> None:
+    # A release does not close the microphone, it schedules the close. The note
+    # has to say so, or an indicator would read as open during the hold.
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path))
+    daemon = _daemon(_Listener())
+
+    daemon.cfg.audio.hold_ms = 50
+    daemon.on_press()
+    daemon.on_release()
+    note = state_mod.read()
+    assert note is not None and note["state"] == state_mod.CLOSING
+
+    daemon._expire_hold()  # too early, the hold is still running
+    note = state_mod.read()
+    assert note is not None and note["state"] == state_mod.CLOSING
+
+    daemon._release_at = 0.0
+    daemon._expire_hold()
+    note = state_mod.read()
+    assert note is not None and note["state"] == state_mod.CLOSED

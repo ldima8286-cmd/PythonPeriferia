@@ -68,7 +68,10 @@ processing:
   # These are PipeWire module-echo-cancel properties, not code in this project.
   noise_suppression: true
   echo_cancellation: true
-  voice_detect: false
+  # Voice activity detection. Cuts the signal between phrases, so quiet
+  # speech can be lost. Turn it off if you would rather have the constant
+  # noise floor than a clipped word.
+  voice_detect: true
   tail_length_ms: 200
 
   # Anything else the module accepts.

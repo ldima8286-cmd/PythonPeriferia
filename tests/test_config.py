@@ -22,7 +22,7 @@ def test_defaults_when_nothing_configured() -> None:
 
 def test_to_dict_is_nested_plain_data() -> None:
     data = config_mod.Config().to_dict()
-    assert set(data) == {"audio", "ptt", "processing", "tray", "log"}
+    assert set(data) == {"audio", "ptt", "processing", "log"}
     assert isinstance(data["audio"], dict)
     assert data["audio"]["attack_ms"] == 10
 
@@ -46,7 +46,6 @@ def test_every_field_is_typed() -> None:
         config_mod.AudioConfig,
         config_mod.PttConfig,
         config_mod.ProcessingConfig,
-        config_mod.TrayConfig,
         config_mod.LogConfig,
     ):
         assert dataclasses.is_dataclass(cls)

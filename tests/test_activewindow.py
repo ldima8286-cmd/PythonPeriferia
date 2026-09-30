@@ -205,6 +205,41 @@ class TestStepCodes:
         assert line == ["run (exit 1): no such object"]
 
 
+class TestExplain:
+    def _failed(self, text: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess([], 1, "", text)
+
+    def test_it_names_the_step_that_failed(self) -> None:
+        report = activewindow._explain(self._failed("boom\n"), "start")
+        assert report.detail.startswith("start failed")
+
+    def test_an_invalid_path_is_recognised(self) -> None:
+        report = activewindow._explain(
+            self._failed("Error: /Scripting/Script-1 is not a valid object path"), "run"
+        )
+        assert "path KWin does not have" in report.detail
+        assert "start()" in report.hint
+
+    def test_a_missing_kwin_is_still_its_own_case(self) -> None:
+        report = activewindow._explain(
+            self._failed("The name is not provided by any .service files")
+        )
+        assert "not reachable" in report.detail
+
+
+class TestScriptingMethods:
+    def test_method_names_are_read_out_of_introspection(self) -> None:
+        xml = '<node><interface name="org.kde.kwin.Scripting">'
+        xml += '<method name="loadScript"/><method name="start"/>'
+        xml += '<method name="unloadScript"/><signal name="something"/>'
+        xml += "</interface></node>"
+        assert activewindow._parse_methods(xml) == {
+            "loadScript",
+            "start",
+            "unloadScript",
+        }
+
+
 class TestMatchable:
     def _report(self, **kwargs: str) -> activewindow.WindowReport:
         return activewindow.WindowReport("ok", "", **kwargs)

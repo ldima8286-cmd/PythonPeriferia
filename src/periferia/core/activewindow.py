@@ -204,6 +204,30 @@ def _gdbus(
     return _run(args)
 
 
+def scripting_methods() -> set[str]:
+    asked = _run(
+        [
+            "gdbus",
+            "introspect",
+            "--session",
+            "--dest",
+            KWIN_SERVICE,
+            "--object-path",
+            SCRIPTING_PATH,
+        ]
+    )
+    return _parse_methods(asked.stdout)
+
+
+def _parse_methods(introspection: str) -> set[str]:
+    methods = set()
+    for block in re.findall(r"<method\b.*?/>", introspection, re.S):
+        found = re.search(r'name="([A-Za-z]+)"', block)
+        if found:
+            methods.add(found.group(1))
+    return methods
+
+
 def bus_names() -> list[str]:
     out = _run(
         [
@@ -437,8 +461,8 @@ def probe(
         started = _gdbus("start")
         steps.append(("start", started))
         if started.returncode != 0:
-            return _explain(started)
-        if script_id is not None:
+            return _explain(started, "start")
+        if "run" in scripting_methods():
             ran = _gdbus(
                 "run",
                 path=f"{SCRIPTING_PATH}/Script{script_id}",
@@ -446,7 +470,7 @@ def probe(
             )
             steps.append(("run", ran))
             if ran.returncode != 0:
-                return _explain(ran)
+                return _explain(ran, "run")
         report, alive = _await_window(service, timeout, script_id)
         if report is None:
             if alive:
@@ -497,9 +521,11 @@ def cleanup(script_id: int | None) -> None:
         _gdbus("unloadScript", str(script_id))
 
 
-def _explain(failed: subprocess.CompletedProcess[str]) -> WindowReport:
+def _explain(
+    failed: subprocess.CompletedProcess[str], step: str = "loadScript"
+) -> WindowReport:
     text = (failed.stderr or failed.stdout).strip()
-    reason = text.splitlines()[-1] if text else "loadScript failed"
+    reason = text.splitlines()[-1] if text else f"{step} failed"
     if "ServiceUnknown" in text or "not provided by any" in text:
         present = [
             name for name in bus_names() if "kde" in name.lower() or "kwin" in name.lower()
@@ -514,7 +540,14 @@ def _explain(failed: subprocess.CompletedProcess[str]) -> WindowReport:
         )
     if "AccessDenied" in text or "not authorized" in text:
         return WindowReport(FAIL, "KWin refused the call", reason)
-    return WindowReport(FAIL, f"loadScript failed: {reason}")
+    if "not a valid object path" in text or "is not a valid" in text:
+        return WindowReport(
+            FAIL,
+            f"{step} was given a path KWin does not have",
+            f"{reason}\nKWin 6 runs a loaded script from start() and has no such "
+            f"per-script object, which is why {step} is not worth calling",
+        )
+    return WindowReport(FAIL, f"{step} failed: {reason}")
 
 
 def _parse_int(text: str) -> int | None:

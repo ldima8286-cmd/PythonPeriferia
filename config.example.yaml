@@ -91,3 +91,16 @@ log:
   file: null
 
   enabled: true
+
+# Keyboard profiles. A profile rewrites which physical key produces what.
+# Only the table and its validation exist so far: nothing grabs the keyboard
+# yet, so a profile changes nothing at runtime until that is switched on.
+# Modifiers that stay held (shift, ctrl, alt, meta) are refused, because a
+# virtual device that emits a held modifier can leave it stuck down. Lock keys
+# are fine. Key names are physical, so "Й" is the key labelled Q in latin.
+#
+# profiles:
+#   - name: game
+#     remap:
+#       KEY_CAPSLOCK: KEY_ESC
+#       KEY_F1: KEY_F13

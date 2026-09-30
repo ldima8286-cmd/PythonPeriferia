@@ -22,9 +22,10 @@ def test_defaults_when_nothing_configured() -> None:
 
 def test_to_dict_is_nested_plain_data() -> None:
     data = config_mod.Config().to_dict()
-    assert set(data) == {"audio", "ptt", "processing", "log"}
+    assert set(data) == {"audio", "ptt", "processing", "log", "profiles"}
     assert isinstance(data["audio"], dict)
     assert data["audio"]["attack_ms"] == 10
+    assert data["profiles"] == []
 
 
 def test_build_rejects_unknown_keys() -> None:
@@ -54,3 +55,41 @@ def test_every_field_is_typed() -> None:
 def test_curve_names_are_known() -> None:
     valid = {"exp", "linear", "s_curve"}
     assert config_mod.AudioConfig().curve in valid
+
+
+class TestProfiles:
+    def test_absent_gives_no_profiles(self, tmp_path):
+        path = tmp_path / "config.yaml"
+        path.write_text("ptt:\n  ptt_key: KEY_GRAVE\n", encoding="utf-8")
+        assert config_mod.load(path).profiles == []
+
+    def test_profiles_are_parsed(self, tmp_path):
+        path = tmp_path / "config.yaml"
+        path.write_text(
+            "profiles:\n"
+            "  - name: game\n"
+            "    remap:\n"
+            "      KEY_CAPSLOCK: KEY_ESC\n",
+            encoding="utf-8",
+        )
+        profiles = config_mod.load(path).profiles
+        assert len(profiles) == 1
+        assert profiles[0].name == "game"
+        assert profiles[0].enabled is True
+        assert profiles[0].remap == {"KEY_CAPSLOCK": "KEY_ESC"}
+
+    def test_not_a_list_is_rejected(self, tmp_path):
+        path = tmp_path / "config.yaml"
+        path.write_text("profiles:\n  name: game\n", encoding="utf-8")
+        with pytest.raises(ValueError, match="expected a list for profiles"):
+            config_mod.load(path)
+
+    def test_unknown_profile_key_is_rejected(self, tmp_path):
+        path = tmp_path / "config.yaml"
+        path.write_text("profiles:\n  - name: game\n    nope: 1\n", encoding="utf-8")
+        with pytest.raises(ValueError, match=r"profiles\[0\]: unknown keys"):
+            config_mod.load(path)
+
+    def test_to_dict_roundtrips(self):
+        cfg = config_mod.Config(profiles=[config_mod.ProfileConfig(name="game")])
+        assert cfg.to_dict()["profiles"][0]["name"] == "game"

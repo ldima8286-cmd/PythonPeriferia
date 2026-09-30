@@ -73,6 +73,20 @@ class ProcessingConfig:
 
 
 @dataclasses.dataclass(slots=True)
+class ProfileConfig:
+    """One keyboard layout to switch to: which physical key becomes which.
+
+    Only one profile is applied at a time. Deciding which one from the focused
+    window is the part that needs a portal on Wayland, so for now `enabled` is
+    all that selects.
+    """
+
+    name: str = "default"
+    enabled: bool = True
+    remap: dict[str, str] = dataclasses.field(default_factory=dict)
+
+
+@dataclasses.dataclass(slots=True)
 class LogConfig:
     level: str = "info"
     file: str | None = None
@@ -96,6 +110,7 @@ class Config:
     ptt: PttConfig = dataclasses.field(default_factory=PttConfig)
     processing: ProcessingConfig = dataclasses.field(default_factory=ProcessingConfig)
     log: LogConfig = dataclasses.field(default_factory=LogConfig)
+    profiles: list[ProfileConfig] = dataclasses.field(default_factory=list)
     path: Path | None = None
 
     def to_dict(self) -> dict[str, Any]:
@@ -104,6 +119,7 @@ class Config:
             "ptt": _unbox(self.ptt),
             "processing": _unbox(self.processing),
             "log": _unbox(self.log),
+            "profiles": [_unbox(p) for p in self.profiles],
         }
 
 
@@ -119,6 +135,20 @@ def _build(cls: type, data: Any) -> Any:
     if unknown:
         raise ValueError(f"unknown keys in {cls.__name__}: {sorted(unknown)}")
     return cls(**known)
+
+
+def _build_profiles(data: Any) -> list[ProfileConfig]:
+    if data is None:
+        return []
+    if not isinstance(data, list):
+        raise ValueError(f"expected a list for profiles, got {type(data).__name__}")
+    out = []
+    for index, item in enumerate(data):
+        try:
+            out.append(_build(ProfileConfig, item))
+        except ValueError as exc:
+            raise ValueError(f"profiles[{index}]: {exc}") from None
+    return out
 
 
 def find_config(explicit: str | Path | None = None) -> Path | None:
@@ -152,6 +182,7 @@ def load(explicit: str | Path | None = None) -> Config:
         ptt=_build(PttConfig, data.get("ptt")),
         processing=_build(ProcessingConfig, data.get("processing")),
         log=_build(LogConfig, data.get("log")),
+        profiles=_build_profiles(data.get("profiles")),
         path=path,
     )
 

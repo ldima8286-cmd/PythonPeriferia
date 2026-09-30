@@ -329,11 +329,12 @@ jack. It is not implemented, and the reason was misdiagnosed once already:
 `pactl load-module module-filter-chain` fails with "no such object", but that
 does not mean the module is missing. `libpipewire-module-filter-chain.so` is
 present in the ostree image, and `pactl list short modules` only ever lists
-loaded modules, so its absence from that list proved nothing. The load still fails from a real shell too, with the short module name and a
-graph taken from the manual, so filter-chain is not reachable through
-`pactl load-module` here and the reason remains unknown. compressor and
-de-esser. Blocked: this PipeWire has no `module-lv2`, no
-`module-filter-chain` and no LADSPAF host, so there is nowhere to put one
+loaded modules, so its absence from that list proved nothing. The load fails from a real shell too, with the short module name and a graph
+copied from the manual, so filter-chain is not reachable through
+`pactl load-module` on this machine and the cause is still unknown. Two
+independent attempts, both with the same error, so treat that as settled.
+filter-chain is also where a compressor would have to live, which is why
+compression is delegated to EasyEffects.
 
 It is also not established that the problem exists. A card that duplicates one
 mono input into both channels needs no downmix, and no one has measured whether

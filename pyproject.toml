@@ -27,7 +27,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-gui = ["PySide6>=6.6"]
+gui = ["PySide6>=6.6", "ruamel.yaml>=0.18"]
 xkb = ["pyxkbcommon>=1.5"]
 dev = ["pytest>=8.0", "ruff>=0.6", "mypy>=1.11", "types-PyYAML>=6.0"]
 
@@ -35,6 +35,7 @@ dev = ["pytest>=8.0", "ruff>=0.6", "mypy>=1.11", "types-PyYAML>=6.0"]
 periferia = "periferia.cli:main"
 periferia-daemon = "periferia.core.daemon:main"
 periferia-check = "periferia.core.envcheck:main"
+periferia-gui = "periferia.gui.window:main"
 
 [project.urls]
 Repository = "https://github.com/ldima8286-cmd/PythonPeriferia"

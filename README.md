@@ -344,3 +344,24 @@ channels settles that.
 ## License
 
 MIT.
+
+### The window
+
+`periferia-gui` opens a real window instead of the terminal interface. It shows
+what the microphone is doing, straight from the same state file
+`periferia status` reads, so there is nothing to keep in step and no second
+source of truth.
+
+It edits one thing so far: the keyboard profile. Saving rewrites only the
+`profiles` section and keeps the comments, indentation and any section the
+window has no opinion about, because a settings window that reflows the rest of
+your config on every save is worse than no window at all.
+
+```bash
+uv pip install --python .venv/bin/python -e ".[gui]"
+.venv/bin/periferia-gui
+```
+
+The window has no say over the audio path or the daemon. It is a view of what
+they already do, which is why it can be replaced without changing anything
+else.

@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from ..core import state as state_mod
-from ..modules.hotkey import code_name, resolve_key
+from ..modules.hotkey import key_label, resolve_key
 from ..modules.remap import RemapError, build_remap
 
 try:
@@ -47,7 +47,16 @@ def _yaml_for(text: str) -> Any:
 
 @dataclasses.dataclass(frozen=True, slots=True)
 class KeyChoice:
+    """A key as the user reads it, and as the config has to spell it.
+
+    `label` is for the picker and `name` for the file. They are different
+    things: a Russian user looks for Ё, where the keycode is called GRAVE.
+    Rebuilding the name from the label is how that pair stops matching, so the
+    name is carried alongside instead of being re-derived.
+    """
+
     code: int
+    name: str
     label: str
 
 
@@ -56,8 +65,11 @@ def available_keys() -> list[KeyChoice]:
 
     Buttons are excluded: they are a different kind of thing and the remapper
     only promises to handle keys. `KEY_RESERVED` and the count macros are
-    dropped for the same reason, and a stable sort keeps the list from jumping
-    between openings.
+    dropped for the same reason.
+
+    Sorted by name rather than label. The labels carry Russian letters, and
+    sorting on those would put the whole alphabet in the middle of the list
+    with the digits on either side, which is not a list anybody can read.
     """
     from evdev import ecodes
 
@@ -67,13 +79,9 @@ def available_keys() -> list[KeyChoice]:
             continue
         if name in ("KEY_RESERVED", "KEY_MAX", "KEY_CNT"):
             continue
-        out.append(KeyChoice(code=code, label=name.removeprefix("KEY_")))
-    out.sort(key=lambda k: k.label)
+        out.append(KeyChoice(code=code, name=name, label=key_label(code)))
+    out.sort(key=lambda k: k.name)
     return out
-
-
-def key_label(code: int) -> str:
-    return code_name(code).removeprefix("KEY_")
 
 
 Row = tuple[str, str]
@@ -125,7 +133,7 @@ def suggest_row(rows: Sequence[Row], keys: Sequence[KeyChoice]) -> Row | None:
     the user can accept as is, and two free distinct keys always are.
     """
     used = {row[0] for row in rows} | {row[1] for row in rows}
-    free = [f"KEY_{choice.label}" for choice in keys if f"KEY_{choice.label}" not in used]
+    free = [choice.name for choice in keys if choice.name not in used]
     if len(free) < 2:
         return None
     return (free[0], free[1])

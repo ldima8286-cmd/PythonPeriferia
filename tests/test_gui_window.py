@@ -135,3 +135,33 @@ def test_close_stops_the_timer(app, tmp_path):
     window = _window(app, tmp_path, "ptt:\n  ptt_key: KEY_GRAVE\n")
     window.close()
     assert not window._timer.isActive()
+
+
+def test_shows_the_russian_letter_for_keys(app, tmp_path):
+    window = _window(
+        app,
+        tmp_path,
+        "ptt:\n  ptt_key: KEY_GRAVE\nprofiles:\n  - name: game\n    remap:\n"
+        "      KEY_GRAVE: KEY_F13\n",
+    )
+    assert window.banner.detail.text().startswith("PTT: Ё (GRAVE)")
+    source = window.editor.table.cellWidget(0, 0)
+    assert source.currentText() == "Ё (GRAVE)"
+
+
+def test_picker_shows_letters_but_writes_keycodes(app, tmp_path):
+    window = _window(app, tmp_path, "ptt:\n  ptt_key: KEY_GRAVE\n")
+    window.editor.set_rows([("KEY_GRAVE", "KEY_F13")])
+    window._save(window.editor.current_rows())
+    text = (tmp_path / "config.yaml").read_text()
+    assert "KEY_GRAVE: KEY_F13" in text
+    assert "Ё" not in text
+
+
+def test_picker_can_be_typed_into(app, tmp_path):
+    window = _window(app, tmp_path, "ptt:\n  ptt_key: KEY_GRAVE\n")
+    window.editor.set_rows([("KEY_CAPSLOCK", "KEY_ESC")])
+    combo = window.editor.table.cellWidget(0, 0)
+    assert combo.isEditable()
+    assert combo.insertPolicy() == combo.InsertPolicy.NoInsert
+    assert combo.completer().filterMode().name == "MatchContains"

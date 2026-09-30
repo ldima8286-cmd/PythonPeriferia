@@ -140,21 +140,42 @@ class TestSaving:
 
 
 class TestKeys:
-    def test_picker_offers_keys(self):
-        keys = model.available_keys()
-        assert any(k.label == "A" for k in keys)
-        assert all(k.label != "" for k in keys)
+    def test_picker_offers_the_russian_letter(self):
+        by_name = {k.name: k for k in model.available_keys()}
+        assert by_name["KEY_GRAVE"].label == "Ё (GRAVE)"
+        assert by_name["KEY_A"].label == "Ф (A)"
+
+    def test_label_carries_the_keycode_name_too(self):
+        by_name = {k.name: k for k in model.available_keys()}
+        assert "GRAVE" in by_name["KEY_GRAVE"].label
+
+    def test_name_is_what_the_config_gets(self):
+        for choice in model.available_keys():
+            assert choice.name.startswith("KEY_")
 
     def test_picker_has_no_buttons(self):
-        assert all(not k.label.startswith("BTN") for k in model.available_keys())
+        assert all(k.name.startswith("KEY_") for k in model.available_keys())
 
-    def test_picker_order_is_stable(self):
-        assert [k.label for k in model.available_keys()] == [
-            k.label for k in model.available_keys()
+    def test_picker_is_sorted_by_name_not_label(self):
+        names = [k.name for k in model.available_keys()]
+        assert names == sorted(names)
+
+    def test_order_is_stable_between_calls(self):
+        assert [k.name for k in model.available_keys()] == [
+            k.name for k in model.available_keys()
         ]
 
-    def test_label_strips_the_prefix(self):
-        assert model.resolve_label("KEY_GRAVE") == "GRAVE"
+    def test_non_letter_keys_have_no_cyrillic(self):
+        by_name = {k.name: k for k in model.available_keys()}
+        assert by_name["KEY_1"].label == "1"
+        assert by_name["KEY_ESC"].label == "ESC"
+
+    def test_resolve_label_matches_the_tui(self):
+        from evdev import ecodes
+
+        from src.periferia.modules.hotkey import key_label as tui_label
+
+        assert model.resolve_label("KEY_GRAVE") == tui_label(ecodes.ecodes["KEY_GRAVE"])
 
     def test_unknown_name_passes_through(self):
         assert model.resolve_label("KEY_NOPE") == "KEY_NOPE"
@@ -209,7 +230,10 @@ class TestStatus:
 
 
 def _keys() -> list[model.KeyChoice]:
-    return [model.KeyChoice(code=i, label=name) for i, name in enumerate("ABCDEF", start=1)]
+    return [
+        model.KeyChoice(code=i, name=f"KEY_{name}", label=name)
+        for i, name in enumerate("ABCDEF", start=1)
+    ]
 
 
 class TestSuggest:

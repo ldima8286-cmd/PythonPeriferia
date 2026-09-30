@@ -14,11 +14,12 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-from PySide6.QtCore import QTimer
+from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QAction, QKeySequence
 from PySide6.QtWidgets import (
     QApplication,
     QComboBox,
+    QCompleter,
     QFrame,
     QHBoxLayout,
     QHeaderView,
@@ -117,9 +118,21 @@ class RemapEditor(QWidget):
     def _combo(self, current: str) -> QComboBox:
         combo = QComboBox()
         for choice in self._keys:
-            combo.addItem(choice.label, f"KEY_{choice.label}")
+            combo.addItem(choice.label, choice.name)
         index = combo.findData(current)
         combo.setCurrentIndex(index if index >= 0 else 0)
+        # There are several hundred keys and they are not evenly spread over
+        # nine letters, so scrolling to find one is not reasonable. Typing any
+        # part of the label filters instead. Insert is off, because a
+        # free-typed key is not one of the keys the router knows about.
+        combo.setEditable(True)
+        combo.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
+        combo.setDuplicatesEnabled(False)
+        completer = combo.completer()
+        if completer is not None:
+            completer.setCompletionMode(QCompleter.CompletionMode.PopupCompletion)
+            completer.setFilterMode(Qt.MatchFlag.MatchContains)
+            completer.setCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
         return combo
 
     def set_rows(self, rows: list[model.Row]) -> None:

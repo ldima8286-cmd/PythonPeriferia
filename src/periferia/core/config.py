@@ -91,6 +91,39 @@ class ProfileConfig:
     enabled: bool = True
     match: dict[str, str | list[str]] = dataclasses.field(default_factory=dict)
     remap: dict[str, str] = dataclasses.field(default_factory=dict)
+    macros: list[MacroConfig] = dataclasses.field(default_factory=list)
+
+
+@dataclasses.dataclass(slots=True)
+class MacroStep:
+    """One keypress inside a macro, with the timing that makes it a recording.
+
+    `gap_ms` is measured from the previous key coming back up, not from the
+    previous step's start. Both are defensible, but only one of them reproduces
+    a pause the way a person took it, and recording is the whole point.
+
+    `hold_ms` exists because a key that is pressed and never released makes
+    everything typed after it come out as one held modifier.
+    """
+
+    key: str = ""
+    gap_ms: int = 0
+    hold_ms: int = 40
+
+
+@dataclasses.dataclass(slots=True)
+class MacroConfig:
+    """A recorded sequence of keypresses, and the key that plays it back.
+
+    `bind` is empty when the macro is not on a key. A macro with no bind is kept
+    but inert, which is what lets `macro record` save first and ask about the key
+    afterwards without losing the recording.
+    """
+
+    name: str = ""
+    bind: str = ""
+    steps: list[MacroStep] = dataclasses.field(default_factory=list)
+    enabled: bool = True
 
 
 @dataclasses.dataclass(slots=True)
@@ -117,6 +150,7 @@ class Config:
     ptt: PttConfig = dataclasses.field(default_factory=PttConfig)
     processing: ProcessingConfig = dataclasses.field(default_factory=ProcessingConfig)
     log: LogConfig = dataclasses.field(default_factory=LogConfig)
+    macros: list[MacroConfig] = dataclasses.field(default_factory=list)
     profiles: list[ProfileConfig] = dataclasses.field(default_factory=list)
     path: Path | None = None
 
@@ -126,6 +160,7 @@ class Config:
             "ptt": _unbox(self.ptt),
             "processing": _unbox(self.processing),
             "log": _unbox(self.log),
+            "macros": [_unbox(m) for m in self.macros],
             "profiles": [_unbox(p) for p in self.profiles],
         }
 
@@ -144,6 +179,29 @@ def _build(cls: type, data: Any) -> Any:
     return cls(**known)
 
 
+def _build_macros(data: Any, where: str) -> list[MacroConfig]:
+    if data is None:
+        return []
+    if not isinstance(data, list):
+        raise ValueError(f"expected a list for {where}, got {type(data).__name__}")
+    out: list[MacroConfig] = []
+    for index, item in enumerate(data):
+        try:
+            macro = _build(MacroConfig, item)
+        except ValueError as exc:
+            raise ValueError(f"{where}[{index}]: {exc}") from None
+        if not isinstance(item, dict):
+            raise ValueError(f"{where}[{index}]: expected a mapping")
+        steps = item.get("steps") or []
+        if not isinstance(steps, list):
+            raise ValueError(f"{where}[{index}].steps: expected a list")
+        macro.steps = [
+            _build(MacroStep, step) for step in steps
+        ]
+        out.append(macro)
+    return out
+
+
 def _build_profiles(data: Any) -> list[ProfileConfig]:
     if data is None:
         return []
@@ -155,6 +213,8 @@ def _build_profiles(data: Any) -> list[ProfileConfig]:
             out.append(_build(ProfileConfig, item))
         except ValueError as exc:
             raise ValueError(f"profiles[{index}]: {exc}") from None
+        if isinstance(item, dict):
+            out[-1].macros = _build_macros(item.get("macros"), f"profiles[{index}].macros")
     return out
 
 
@@ -188,6 +248,7 @@ def load(explicit: str | Path | None = None) -> Config:
         audio=_build(AudioConfig, data.get("audio")),
         ptt=_build(PttConfig, data.get("ptt")),
         processing=_build(ProcessingConfig, data.get("processing")),
+        macros=_build_macros(data.get("macros"), "macros"),
         log=_build(LogConfig, data.get("log")),
         profiles=_build_profiles(data.get("profiles")),
         path=path,

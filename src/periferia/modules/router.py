@@ -122,6 +122,7 @@ class KeyboardRouter:
         on_press: Callable[[], None] | None = None,
         on_release: Callable[[], None] | None = None,
         on_panic: Callable[[], None] | None = None,
+        macro_codes: Mapping[int, Callable[[], None]] | None = None,
     ) -> None:
         self.devices = [Path(d) for d in devices]
         self.ptt_code = ptt_code
@@ -131,10 +132,14 @@ class KeyboardRouter:
         self.on_press = on_press
         self.on_release = on_release
         self.on_panic = on_panic
+        # Same contract as HotkeyListener, so a macro bound to a key keeps
+        # working whether or not a remap table happens to be active.
+        self.macro_codes = dict(macro_codes or {})
 
         self._channels: list[_Channel] = []
         self._down = False
         self._panic_down = False
+        self._macro_down: set[int] = set()
 
     @property
     def watch(self) -> frozenset[int]:
@@ -223,7 +228,16 @@ class KeyboardRouter:
                 self._panic_down = False
             return
 
+        # PTT before macros, matching HotkeyListener: on a collision the
+        # microphone keeps working rather than going silently dead.
         if action.code != self.ptt_code:
+            if action.code in self.macro_codes:
+                if action.pressed:
+                    if action.code not in self._macro_down:
+                        self._macro_down.add(action.code)
+                        self.macro_codes[action.code]()
+                else:
+                    self._macro_down.discard(action.code)
             return
 
         if action.pressed:

@@ -11,14 +11,17 @@ import select
 import shutil
 import sys
 import time
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
 from .core import activewindow, envcheck, pipewire, validate
 from .core import config as config_mod
+from .core import macro as macro_mod
 from .core import state as state_mod
+from .gui import model
 from .modules import audio as audio_mod
-from .modules import hotkey
+from .modules import hotkey, macrodevice
 
 RESET = "\033[0m"
 DIM = "\033[2m"
@@ -130,6 +133,278 @@ def cmd_pick_key(args: argparse.Namespace) -> int:
     return 1
 
 
+def _open_keyboards(what: str) -> dict[int, Any]:
+    """Open every readable keyboard, or exit with a reason why not."""
+    if hotkey.ecodes is None:
+        print("evdev is not installed: pip install evdev", file=sys.stderr)
+        raise SystemExit(1)
+    devices = hotkey.find_keyboards("auto", include_pointers=False)
+    if not devices:
+        print("no keyboard device found", file=sys.stderr)
+        print("run 'periferia check' to see what is visible and what is blocked", file=sys.stderr)
+        raise SystemExit(1)
+    opened: dict[int, Any] = {}
+    for path in devices:
+        try:
+            dev = hotkey.open_device(path)
+        except OSError as exc:
+            print(f"cannot open {path}: {exc}", file=sys.stderr)
+            continue
+        opened[dev.fd] = dev
+    if not opened:
+        print(f"none of the keyboards could be opened, so {what} is not possible", file=sys.stderr)
+        print("this usually means missing permissions, see docs/udev.md", file=sys.stderr)
+        raise SystemExit(1)
+    return opened
+
+
+def _macro_rows(
+    cfg: config_mod.Config, names: Sequence[str] = ()
+) -> tuple[list[Any], list[tuple[str, str]]]:
+    """The macros that can be built, plus the ones that cannot and why.
+
+    A macro with an unresolvable key name must not take the others down with it.
+    Listing is how someone finds out what is wrong, so raising here would replace
+    the list with a stack trace and hide the twelve macros that are fine. The
+    failure is returned instead, and 'macro check' is what reports it properly.
+    """
+    broken: list[tuple[str, str]] = []
+    out: list[Any] = []
+    entries = list(cfg.macros)
+    for profile in cfg.profiles:
+        if profile.enabled:
+            entries.extend(profile.macros)
+            break
+    for entry in entries:
+        name = getattr(entry, "name", "") or "?"
+        try:
+            out.append(macro_mod.from_config(entry, _resolve_macro_key))
+        except macro_mod.MacroError as exc:
+            broken.append((name, str(exc)))
+    if names:
+        wanted = set(names)
+        out = [m for m in out if m.name in wanted]
+    return out, broken
+
+
+def _resolve_macro_key(name: str) -> int | None:
+    return hotkey.resolve_key(str(name).strip().upper())
+
+
+def _key_name(code: int) -> str:
+    return hotkey.code_name(code)
+
+
+def cmd_macro(args: argparse.Namespace) -> int:
+    conf = config_mod.load(args.config)
+    reserved = [conf.ptt.ptt_key, conf.ptt.panic_key]
+    action = args.macro_command
+
+    if action in ("list", "check"):
+        report = validate.check_macros(conf.macros, conf.profiles, reserved=reserved)
+        if action == "check":
+            return _print_report(report)
+
+        macros, broken = _macro_rows(conf)
+        print(f"{BOLD}macros{RESET}")
+        if not macros and not broken:
+            print(f"  {DIM}none configured{RESET}")
+            print(f"  {DIM}record one with: periferia macro record NAME{RESET}")
+        for m in macros:
+            bind = m.bind or _c("not on a key", YELLOW)
+            summary = macro_mod.describe(m, _key_name)
+            print(f"  {m.name:16} {_c(bind, CYAN)}  {_c(summary, DIM)}")
+        for name, why in broken:
+            print(f"  {_c('could not read', RED)} {name}  {_c(why, DIM)}")
+        problems = [p for p in report.problems if p.level == validate.ERROR]
+        if problems:
+            print(f"\n  {_c(f'{len(problems)} that will not play', RED)}")
+            print(f"  {DIM}run: periferia macro check{RESET}")
+        return 0
+
+    if action == "play":
+        macros, broken = _macro_rows(conf)
+        for name, why in broken:
+            if name == args.name:
+                print(f"macro {name!r} cannot be read: {why}", file=sys.stderr)
+                return 1
+        wanted = [m for m in macros if m.name == args.name]
+        if not wanted:
+            print(f"no macro named {args.name!r}", file=sys.stderr)
+            known = ", ".join(m.name for m in macros) or "none"
+            print(f"known: {known}", file=sys.stderr)
+            return 1
+        macro = wanted[0]
+        try:
+            steps = macro_mod.plan(
+                macro,
+                _resolve_macro_key(macro.bind) if macro.bind else None,
+                {c for c in (_resolve_macro_key(r) for r in reserved) if c is not None},
+            )
+        except macro_mod.MacroError as exc:
+            print(f"cannot play: {exc}", file=sys.stderr)
+            return 1
+        player = macrodevice.MacroPlayer()
+        if not player.play(steps):
+            print("nothing played", file=sys.stderr)
+            return 1
+        while player.playing:
+            time.sleep(0.02)
+        player.close()
+        return 0
+
+    if action == "record":
+        return _macro_record(args, conf)
+
+    if action == "delete":
+        return _macro_delete(args, conf)
+
+    print(f"unknown macro command {action!r}", file=sys.stderr)
+    return 2
+
+
+def _macro_record(args: argparse.Namespace, conf: config_mod.Config) -> int:
+    stop_code = hotkey.resolve_key(args.stop_key.upper())
+    if stop_code is None:
+        print(f"unknown stop key {args.stop_key!r}", file=sys.stderr)
+        return 1
+    recorder = macro_mod.Recorder(ignore=frozenset({stop_code}))
+    opened = _open_keyboards("recording")
+    print(f"recording into {BOLD}{args.name}{RESET}")
+    print(f"press the keys you want, then {BOLD}{args.stop_key}{RESET} to stop, Esc cancels")
+    print("the keyboards are not grabbed, other programs still see every key\n")
+    deadline = time.monotonic() + args.timeout
+    try:
+        while time.monotonic() < deadline:
+            try:
+                readable, _, _ = select.select(list(opened), [], [], 0.5)
+            except (OSError, ValueError):
+                readable = []
+            for fd in readable:
+                dev = opened[fd]
+                for event in dev.read():
+                    if event.type != hotkey.ecodes.EV_KEY:
+                        continue
+                    now = time.monotonic()
+                    if event.code == stop_code and event.value == hotkey.RELEASE:
+                        return _macro_finish(args, conf, recorder, opened, cancelled=False)
+                    if event.code == hotkey.ecodes.KEY_ESC and event.value == hotkey.PRESS:
+                        return _macro_finish(args, conf, recorder, opened, cancelled=True)
+                    if event.value in (hotkey.PRESS, hotkey.RELEASE):
+                        recorder.feed(now, event.code, event.value)
+    except KeyboardInterrupt:
+        print("\ncancelled")
+        return 130
+    finally:
+        for dev in opened.values():
+            with contextlib.suppress(OSError):
+                dev.close()
+    print("\nnothing recorded before the timeout", file=sys.stderr)
+    return 1
+
+
+def _macro_finish(
+    args: argparse.Namespace,
+    conf: config_mod.Config,
+    recorder: macro_mod.Recorder,
+    opened: dict[int, Any],
+    cancelled: bool,
+) -> int:
+    for dev in opened.values():
+        with contextlib.suppress(OSError):
+            dev.close()
+    steps = recorder.finish()
+    if cancelled:
+        print("\ncancelled")
+        return 130
+    if not steps:
+        print("\nnothing was recorded, the config was not changed", file=sys.stderr)
+        return 1
+
+    print(f"\n  {_c(f'{len(steps)} keypresses', GREEN)}")
+    shown = " ".join(hotkey.code_name(s.code) for s in steps[:12])
+    if len(steps) > 12:
+        shown += f" +{len(steps) - 12} more"
+    print(f"  {DIM}{shown}{RESET}")
+
+    bind = args.bind
+    if bind is None:
+        # Only ask when there is someone there to answer. Piped into a script,
+        # the prompt would read the next line of the script as a key name.
+        bind = (
+            input("  key to play it on (blank for none): ").strip().upper()
+            if sys.stdin.isatty()
+            else ""
+        )
+    if bind and _resolve_macro_key(bind) is None:
+        print(f"  {bind!r} is not a key this project knows, saving it unbound", file=sys.stderr)
+        bind = ""
+
+    path = conf.path or config_mod.default_config_path()
+    try:
+        model.save_macro(
+            path,
+            args.name,
+            [(hotkey.code_name(s.code), s.gap_ms, s.hold_ms) for s in steps],
+            bind=bind,
+            profiles=list(args.in_profile or ()),
+        )
+    except OSError as exc:
+        print(f"cannot write {path}: {exc}", file=sys.stderr)
+        return 1
+    print(f"  saved to {path}")
+    print(f"  {_c('check it with: periferia macro check', DIM)}")
+    return 0
+
+
+def _macro_delete(args: argparse.Namespace, conf: config_mod.Config) -> int:
+    path = conf.path or config_mod.default_config_path()
+    data = model.load_raw(path)
+    found = False
+    container = data if isinstance(data, dict) else {}
+    for profile in container.get("profiles") or []:
+        if not isinstance(profile, dict):
+            continue
+        kept = [m for m in (profile.get("macros") or []) if m.get("name") != args.name]
+        if len(kept) != len(profile.get("macros") or []):
+            found = True
+            profile["macros"] = kept
+    kept = [m for m in (container.get("macros") or []) if m.get("name") != args.name]
+    if len(kept) != len(container.get("macros") or []):
+        found = True
+        container["macros"] = kept
+    if not found:
+        print(f"no macro named {args.name!r} in {path}", file=sys.stderr)
+        return 1
+    import yaml as pyyaml
+
+    path.write_text(pyyaml.safe_dump(container, sort_keys=False), encoding="utf-8")
+    print(f"deleted {args.name!r} from {path}")
+    return 0
+
+
+def _print_report(report: validate.Report) -> int:
+    """Print a report the same way for profiles and for macros.
+
+    Two copies of this drifted once already: the macro one grew a wording
+    difference that made the same severity read differently depending on which
+    command found it.
+    """
+    if not report.problems:
+        print(f"\n  {_c('nothing to report', GREEN)}")
+        return 0
+    print()
+    for problem in report.problems:
+        colour = RED if problem.level == validate.ERROR else YELLOW
+        print(f"  {_c(problem.level, colour)}  {problem.where}: {problem.message}")
+    print()
+    if not report.ok:
+        print(f"  {_c(f'{len(report.errors)} that will stop it working', RED)}")
+    if report.warnings:
+        print(f"  {_c(f'{len(report.warnings)} worth knowing', YELLOW)}")
+    return 1
+
+
 def cmd_profiles(args: argparse.Namespace) -> int:
     conf = config_mod.load(args.config)
     report = validate.check_profiles(
@@ -144,19 +419,7 @@ def cmd_profiles(args: argparse.Namespace) -> int:
         off = "" if profile.enabled else f" {DIM}(disabled){RESET}"
         keys = len(profile.remap)
         print(f"  {profile.name:16} {match}{off} {DIM}{keys} keys{RESET}")
-    if not report.problems:
-        print(f"\n  {_c('nothing to report', GREEN)}")
-        return 0
-    print()
-    for problem in report.problems:
-        colour = RED if problem.level == validate.ERROR else YELLOW
-        print(f"  {_c(problem.level, colour)}  {problem.where}: {problem.message}")
-    print()
-    if not report.ok:
-        print(f"  {_c(f'{len(report.errors)} that will stop it working', RED)}")
-    if report.warnings:
-        print(f"  {_c(f'{len(report.warnings)} worth knowing', YELLOW)}")
-    return 1
+    return _print_report(report)
 
 
 def cmd_probe_window(args: argparse.Namespace) -> int:
@@ -567,6 +830,50 @@ def build_parser() -> argparse.ArgumentParser:
         "profiles",
         help="show the configured profiles and what is wrong with them",
     ).set_defaults(func=cmd_profiles)
+
+    macro_cmd = sub.add_parser("macro", help="record, list and check macros")
+    macro_sub = macro_cmd.add_subparsers(dest="macro_command")
+
+    macro_sub.add_parser("list", help="show the macros and what they do").set_defaults(
+        func=cmd_macro
+    )
+    macro_sub.add_parser("check", help="say what is wrong with the macros").set_defaults(
+        func=cmd_macro
+    )
+
+    play = macro_sub.add_parser("play", help="play one macro now")
+    play.add_argument("name", help="the macro to play")
+    play.set_defaults(func=cmd_macro)
+
+    record = macro_sub.add_parser("record", help="record a macro from the keyboard")
+    record.add_argument("name", help="what to call it")
+    record.add_argument(
+        "--bind",
+        default=None,
+        help="the key that will play it, e.g. KEY_F5. Asked for if not given",
+    )
+    record.add_argument(
+        "--stop-key",
+        default="KEY_F12",
+        help="the key that ends the recording (default: KEY_F12)",
+    )
+    record.add_argument(
+        "--in-profile",
+        action="append",
+        metavar="NAME",
+        help="also put a copy in this profile, may be given more than once",
+    )
+    record.add_argument(
+        "--timeout",
+        type=float,
+        default=60.0,
+        help="give up after this many seconds (default: 60)",
+    )
+    record.set_defaults(func=cmd_macro)
+
+    delete = macro_sub.add_parser("delete", help="remove a macro")
+    delete.add_argument("name", help="the macro to remove")
+    delete.set_defaults(func=cmd_macro)
 
     probe = sub.add_parser(
         "probe-window",

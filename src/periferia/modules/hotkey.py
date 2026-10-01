@@ -13,7 +13,7 @@ import os
 import re
 import select
 import time
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -338,7 +338,15 @@ class HotkeyListener:
     Press state is global rather than per device, so pressing PTT on the laptop
     keyboard and releasing it on the external one still closes the microphone
     instead of leaving it stuck open.
+
+    The class-level defaults below exist because the tests build a listener
+    without running __init__ and then hand it events directly. Anything _handle
+    reads has to be readable on a bare instance, or a test that only cares about
+    PTT fails on the macro plumbing instead of on PTT.
     """
+
+    macro_codes: Mapping[int, Callable[[], None]] = {}
+    on_any_key: Callable[[float, int, int], None] | None = None
 
     def __init__(
         self,
@@ -350,6 +358,8 @@ class HotkeyListener:
         on_press: Callable[[], None] | None = None,
         on_release: Callable[[], None] | None = None,
         on_panic: Callable[[], None] | None = None,
+        macro_codes: Mapping[int, Callable[[], None]] | None = None,
+        on_any_key: Callable[[float, int, int], None] | None = None,
     ) -> None:
         if InputDevice is None:
             raise RuntimeError("evdev is not installed")
@@ -362,9 +372,15 @@ class HotkeyListener:
         self.on_press = on_press
         self.on_release = on_release
         self.on_panic = on_panic
+        self.macro_codes = dict(macro_codes or {})
+        # While this is set every key goes to the recorder instead of to PTT or a
+        # macro. A macro recorded through a listener that still fired PTT would
+        # open the microphone on its own first keypress.
+        self.on_any_key = on_any_key
         self._devs: dict[Path, Any] = {}
         self._down = False
         self._panic_down = False
+        self._macro_down: set[int] = set()
 
     def open(self) -> None:
         for path in self.devices:
@@ -448,7 +464,28 @@ class HotkeyListener:
             self._panic_down = False
             return
 
+        # A recorder takes the whole stream and nothing else does, so that
+        # recording cannot also open the microphone or fire a macro on its own
+        # first keypress. Panic is handled above this, which keeps it working as
+        # the way out of a recording that needs ending.
+        if self.on_any_key is not None:
+            self.on_any_key(time.monotonic(), code, value)
+            return
+
+        # PTT is checked before macro triggers on purpose. A macro bound to the
+        # PTT key is a configuration the validator rejects, but if one is loaded
+        # anyway the microphone is the thing that must keep working, so the
+        # collision degrades to PTT rather than to a silently dead hotkey.
         if code != self.ptt_code:
+            if code in self.macro_codes:
+                # Held the same way PTT is: one keypress can arrive from two
+                # interfaces of one keyboard, and the macro must play once.
+                if value == PRESS:
+                    if code not in self._macro_down:
+                        self._macro_down.add(code)
+                        self.macro_codes[code]()
+                elif value == RELEASE:
+                    self._macro_down.discard(code)
             return
 
         if value == PRESS and not self._down:

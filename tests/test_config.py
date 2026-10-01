@@ -22,10 +22,11 @@ def test_defaults_when_nothing_configured() -> None:
 
 def test_to_dict_is_nested_plain_data() -> None:
     data = config_mod.Config().to_dict()
-    assert set(data) == {"audio", "ptt", "processing", "log", "profiles"}
+    assert set(data) == {"audio", "ptt", "processing", "log", "macros", "profiles"}
     assert isinstance(data["audio"], dict)
     assert data["audio"]["attack_ms"] == 10
     assert data["profiles"] == []
+    assert data["macros"] == []
 
 
 def test_build_rejects_unknown_keys() -> None:

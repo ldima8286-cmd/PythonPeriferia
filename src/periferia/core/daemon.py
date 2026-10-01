@@ -9,6 +9,8 @@ import sys
 import threading
 import time
 from collections import deque
+from collections.abc import Callable
+from functools import partial
 from pathlib import Path
 from types import FrameType
 
@@ -20,12 +22,14 @@ from ..modules.hotkey import (
     is_button_code,
     resolve_key,
 )
+from ..modules.macrodevice import MacroPlayer
 from ..modules.processing import MicProcessing
 from ..modules.remap import RemapError, active_remap
 from ..modules.router import KeyboardRouter
 from . import config as config_mod
 from . import logging_setup
 from . import state as state_mod
+from .macro import Macro, bindings, effective
 
 log = logging.getLogger(__name__)
 
@@ -46,11 +50,84 @@ class Daemon:
         self._latched = False
         self._stop = threading.Event()
         self._listener: HotkeyListener | KeyboardRouter | None = None
+        self.macros = MacroPlayer()
+        # Bound macros, resolved once at start. A macro whose key name is not a
+        # real key is left out here and reported by 'periferia macro check'
+        # instead of taking the daemon down on the next keypress.
+        self._macros_by_name: dict[str, Macro] = {}
+        self._macro_codes: dict[int, str] = {}
         # Timestamps of the last few state changes, so a caller can tell what
         # actually happened instead of inferring it from the output. Written
         # from the listener thread, read from anywhere.
         self._events: deque[tuple[float, str]] = deque(maxlen=64)
         self._events_lock = threading.Lock()
+
+    def load_macros(self) -> int:
+        """Resolve the macros this config binds to keys. Returns how many are
+        playable.
+
+        The global set is merged with the first enabled profile, which is how
+        the rest of the program picks a profile. Anything unresolvable is
+        dropped here and reported by 'macro check' rather than raising, because
+        a typo in one macro must not stop the microphone from starting.
+        """
+        from ..modules.hotkey import code_name, resolve_key
+
+        def resolve(name: str) -> int | None:
+            try:
+                code: int | None = resolve_key(str(name).strip().upper())
+            except Exception:
+                return None
+            return code
+
+        try:
+            live = effective(self.cfg.macros, self.cfg.profiles, resolve)
+        except Exception as exc:
+            log.warning("macros could not be loaded: %s", exc)
+            self._macros_by_name = {}
+            self._macro_codes = {}
+            return 0
+        self._macros_by_name = {m.name: m for m in live}
+        # bindings() returns a list per key on purpose, so two macros on one key
+        # stay visible. Which one wins is decided once here instead of inside a
+        # keypress, and the loser is logged, because silently playing the other
+        # one is how a wrong macro looks like a ghosting bug.
+        self._macro_codes = {}
+        for code, on_key in bindings(live, resolve).items():
+            if len(on_key) > 1:
+                log.warning(
+                    "key %s has %d macros on it (%s); using %s",
+                    code_name(code),
+                    len(on_key),
+                    ", ".join(m.name for m in on_key),
+                    on_key[-1].name,
+                )
+            self._macro_codes[code] = on_key[-1].name
+        if self._macro_codes:
+            log.info("%d macro(s) bound to keys", len(self._macro_codes))
+        return len(self._macro_codes)
+
+    def _macro_triggers(self) -> dict[int, Callable[[], None]]:
+        return {
+            code: partial(self.play_macro, name)
+            for code, name in self._macro_codes.items()
+        }
+
+    def play_macro(self, name: str) -> None:
+        """Play one macro by name, replacing whatever was playing.
+
+        No queue. A macro key pressed five times should end with one macro
+        halfway through, not five macros left to run after the user has already
+        moved on to something else.
+        """
+        macro = self._macros_by_name.get(name)
+        if macro is None:
+            log.debug("macro %s is not bound to a key", name)
+            return
+        if not self.macros.play(macro.steps, replace=True):
+            log.warning("macro %s could not start", name)
+            return
+        self._record(f"macro:{name}")
 
     def _record(self, name: str) -> float:
         now = time.monotonic()
@@ -188,6 +265,7 @@ class Daemon:
                 on_press=self.on_press,
                 on_release=self.on_release,
                 on_panic=self.on_panic,
+                macro_codes=self._macro_triggers(),
             )
         return True
 
@@ -210,6 +288,7 @@ class Daemon:
                 on_press=self.on_press,
                 on_release=self.on_release,
                 on_panic=self.on_panic,
+                macro_codes=self._macro_triggers(),
             )
             router.open()
         except Exception as exc:
@@ -222,6 +301,7 @@ class Daemon:
                 on_press=self.on_press,
                 on_release=self.on_release,
                 on_panic=self.on_panic,
+                macro_codes=self._macro_triggers(),
             )
         log.info("keyboard profile is active")
         return router
@@ -266,6 +346,12 @@ class Daemon:
         # Panic has to drop the latch too. Left set, the next press would be
         # read as an unlatch and the microphone would never open again.
         self._latched = False
+        # A macro can hold keys down and wait between them. Panic that only
+        # closed the microphone would leave the typing going, which is worse
+        # than the situation panic was pressed to get out of.
+        if self.macros.playing:
+            log.warning("panic: stopping macro playback")
+        self.macros.stop()
         self.mic.panic()
         state_mod.write(state_mod.PANIC, source=self.mic.source)
         # Stamp the real end of the panic, not a level the TUI polls later.
@@ -333,6 +419,7 @@ class Daemon:
     def run(self) -> int:
         if not self.setup():
             return 1
+        self.load_macros()
 
         listener = self._listener
         assert listener is not None
@@ -366,6 +453,11 @@ class Daemon:
             # next run then collided with it on the source name
             if opened:
                 listener.close()
+            # Releases any key a macro was holding and closes the virtual
+            # device. A macro interrupted by shutdown would otherwise leave a
+            # key down for the rest of the session, and nothing in the log
+            # would say so.
+            self.macros.close()
             self.mic.force_silence()
             state_mod.write(state_mod.CLOSED, source=self.mic.source)
             self.processing.stop()

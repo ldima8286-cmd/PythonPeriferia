@@ -240,3 +240,156 @@ def _code_of(name: str) -> int | None:
         return resolve_key(str(name).strip().upper())
     except Exception:
         return None
+
+
+def check_macros(
+    macros: Sequence[Any],
+    profiles: Sequence[Any] = (),
+    reserved: Iterable[str] = (),
+) -> Report:
+    """What is wrong with the macros, and with the ones profiles redefine.
+
+    Macros type into whatever is in front of the user, so the checks lean towards
+    refusing rather than warning. The one that matters most is a macro replaying
+    its own trigger: the key is bound to the macro, the macro presses the key,
+    and the key is still bound to the macro.
+    """
+    from . import macro as macro_mod
+
+    found: list[Problem] = []
+    reserved_names = {str(name).strip().upper() for name in reserved if str(name).strip()}
+    reserved_codes = {code for code in (_code_of(n) for n in reserved_names) if code is not None}
+
+    # Scopes are walked separately. Merging them into one list made a profile
+    # override look exactly like a duplicate name and a rebound key look like a
+    # clash, so the feature could not be described without the report objecting
+    # to it. Within a scope a repeated name is a mistake; across scopes the same
+    # name is the override mechanism working.
+    scopes: list[tuple[str, list[Any]]] = [("macros", list(macros))]
+    for profile in profiles:
+        if getattr(profile, "enabled", True):
+            where = f"profile '{getattr(profile, 'name', '?')}'"
+            scopes.append((where, list(getattr(profile, "macros", None) or [])))
+            break
+
+    # Only the first enabled profile decides what a key plays, so only it can
+    # produce a real clash. A later profile is reported separately if it needs
+    # it, but two profiles that both want KEY_F5 is not a conflict today.
+    effective_names: dict[str, tuple[str, Any]] = {}
+    for scope, entries in scopes:
+        seen_names: dict[str, int] = {}
+
+        for index, entry in enumerate(entries):
+            name = getattr(entry, "name", "") or ""
+            steps = getattr(entry, "steps", None) or []
+
+            if not getattr(entry, "enabled", True):
+                continue
+
+            if not name:
+                found.append(
+                    Problem(
+                        ERROR,
+                        f"{scope} entry {index + 1}",
+                        "it has no name, so nothing can refer to it",
+                    )
+                )
+                name = f"macro {index + 1}"
+
+            if not steps:
+                found.append(
+                    Problem(
+                        WARNING,
+                        f"macro '{name}'",
+                        "it has no keypresses, so there is nothing to play",
+                    )
+                )
+                continue
+
+            if name in seen_names:
+                found.append(
+                    Problem(
+                        ERROR,
+                        f"macro '{name}'",
+                        f"the same name is used twice in {scope}, at positions"
+                        f" {seen_names[name]} and {index + 1}, so which one is meant"
+                        " is a guess",
+                    )
+                )
+            seen_names[name] = index + 1
+
+            try:
+                built = macro_mod.from_config(entry, _code_of)
+            except macro_mod.MacroError as exc:
+                found.append(
+                    Problem(
+                        ERROR,
+                        f"macro '{name}'",
+                        f"{exc}. It would be refused when the macro played",
+                    )
+                )
+                continue
+
+            effective_names[name] = (scope, entry)
+            bind = (getattr(entry, "bind", "") or "").strip().upper()
+            if not bind:
+                found.append(
+                    Problem(
+                        WARNING,
+                        f"macro '{name}'",
+                        "it is not on a key, so nothing can play it",
+                    )
+                )
+            elif _code_of(bind) is None:
+                found.append(
+                    Problem(ERROR, f"macro '{name}'", f"'{bind}' is not a key this project knows")
+                )
+            elif bind in reserved_names:
+                found.append(
+                    Problem(
+                        ERROR,
+                        f"macro '{name}'",
+                        f"it is bound to {bind}, which is a key this program listens for."
+                        " A macro on that key would fire while the other one works",
+                    )
+                )
+
+            for step in built.steps:
+                if step.code in reserved_codes:
+                    found.append(
+                        Problem(
+                            ERROR,
+                            f"macro '{name}'",
+                            "it plays a key this program listens for, so it would"
+                            " interfere with it every time it played",
+                        )
+                    )
+                    break
+
+            try:
+                macro_mod.plan(built, _code_of(bind) if bind else None, reserved_codes)
+            except macro_mod.MacroError as exc:
+                found.append(Problem(ERROR, f"macro '{name}'", str(exc)))
+
+    # A key can end up with two macros after the overrides are applied: a global
+    # macro on KEY_F5 and a profile macro that moves a different name onto it.
+    # That only matters for the profile that is actually chosen, so it is checked
+    # on the resolved set rather than on the file.
+    resolved: dict[str, str] = {}
+    for name, (_scope, entry) in effective_names.items():
+        bind = (getattr(entry, "bind", "") or "").strip().upper()
+        if not bind or _code_of(bind) is None or bind in reserved_names:
+            continue
+        if bind in resolved:
+            found.append(
+                Problem(
+                    ERROR,
+                    f"macro '{name}'",
+                    f"after profiles are applied it shares {bind} with '{resolved[bind]}',"
+                    " so only one of them will play",
+                )
+            )
+        else:
+            resolved[bind] = name
+
+    return Report(tuple(found))

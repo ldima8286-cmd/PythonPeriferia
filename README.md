@@ -217,6 +217,7 @@ reads the keyboard, it never grabs it, so your typing keeps working normally.
 | `ptt.latch_ms` | 0 | hold this long to latch the mic open, 0 disables |
 | `ptt.max_press_ms` | 300000 | cut off a key held longer than this, 0 disables |
 | `processing.voice_detect` | true | cuts silence between phrases, turn it off if quiet words get lost |
+| `macros` | empty | recorded keypress sequences, see below |
 
 ## The window
 
@@ -231,6 +232,70 @@ Four things, in the order they get asked for:
 
 The last page is the same checks `periferia profiles` runs, so a config can be
 inspected without starting anything.
+
+## Macros
+
+A macro records keypresses with their timing and plays them back when you press
+one key. It is only about the keyboard: nothing here touches the microphone.
+
+```console
+$ periferia macro record hello --bind KEY_F5
+recording hello — press keys, F12 to save, Esc to cancel
+hello: 3 keys, 0.4s
+saved
+
+$ periferia macro list
+macros
+  hello             KEY_F5  3 keys, 0.4s, [KEY_H KEY_E KEY_L]
+```
+
+| Command | What it does |
+| --- | --- |
+| `periferia macro list` | every macro, what plays it, and what is in it |
+| `periferia macro check` | what will not work, and why |
+| `periferia macro play NAME` | play it once, without binding it |
+| `periferia macro record NAME` | record; `--bind KEY_F5`, `--stop-key KEY_F12`, `--in-profile game` |
+| `periferia macro delete NAME` | remove it |
+
+Recording captures how long each key was held and how long the pause before it
+was, so the playback types at the speed you typed rather than as fast as the
+program can.
+
+Two rules worth knowing:
+
+- PTT and the panic key cannot be used. A macro on the panic key would fire
+  while the panic was trying to stop it, and one that replays PTT would open the
+  microphone every time it played. `macro check` says so rather than letting it
+  surprise you.
+- A macro can be defined globally and then overridden inside a profile, which is
+  how one key means one thing everywhere and something else in one window:
+
+```yaml
+macros:
+  - name: hello
+    bind: KEY_F5
+    steps:
+      - key: KEY_H
+        gap_ms: 120
+        hold_ms: 40
+profiles:
+  - name: game
+    match: { resource_class: steam }
+    macros:
+      - name: hello        # same name, so this one wins in this window
+        bind: KEY_F6
+        steps:
+          - key: KEY_GRAVE
+            gap_ms: 30
+            hold_ms: 40
+```
+
+The profile has to already exist; `--in-profile` does not create one. If the
+name does not match anything, the macro is saved globally instead and says so.
+
+Preserving the same name across both places is deliberate. It means the profile
+is an override of one macro rather than a second macro that happens to look
+similar, and `macro check` can tell you which window a key will do what in.
 
 ## Safety
 

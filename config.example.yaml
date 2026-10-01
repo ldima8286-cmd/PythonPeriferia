@@ -104,3 +104,58 @@ log:
 #     remap:
 #       KEY_CAPSLOCK: KEY_ESC
 #       KEY_F1: KEY_F13
+  #
+  # profiles:
+  #   - name: game
+  #     remap:
+  #       KEY_CAPSLOCK: KEY_ESC
+  #       KEY_F1: KEY_F13
+
+# Macros: recorded keypresses replayed by one key. Purely a keyboard feature, it
+# has nothing to do with the microphone. Press `periferia macro check` after
+# editing; it catches the mistakes below before they turn into a key that does
+# nothing.
+#
+# Two rules the program enforces:
+#   - ptt_key and panic_key cannot be used as a bind or inside the steps, so a
+#     macro can never open the mic or fire while a panic is trying to stop it.
+#   - a name repeated under a profile overrides the global one of that name,
+#     rather than becoming a second macro. That is how the same key does one
+#     thing everywhere and another in one window.
+#
+# gap_ms is the pause before the key, hold_ms how long it stays down. Both come
+# from the recording, which is why a macro replays at the speed you typed.
+#
+# macros:
+#   - name: hello
+#     bind: KEY_F5
+#     enabled: true
+#     steps:
+#       - key: KEY_H
+#         gap_ms: 0
+#         hold_ms: 40
+#       - key: KEY_I
+#         gap_ms: 90
+#         hold_ms: 40
+#   - name: ts
+#     bind: KEY_F6
+#     steps:
+#       - key: KEY_T
+#         gap_ms: 0
+#         hold_ms: 40
+#       - key: KEY_S
+#         gap_ms: 60
+#         hold_ms: 40
+#
+# Inside a window, on the same name:
+#
+# profiles:
+#   - name: game
+#     match: { resource_class: steam }
+#     macros:
+#       - name: ts              # overrides the global one, on another key
+#         bind: KEY_F7
+#         steps:
+#           - key: KEY_M
+#             gap_ms: 0
+#             hold_ms: 40

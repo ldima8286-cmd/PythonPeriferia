@@ -8,6 +8,7 @@ in it are all decisions worth testing, and none of them need a display.
 from __future__ import annotations
 
 import dataclasses
+import sys
 from collections.abc import Iterable, Sequence
 from pathlib import Path
 from typing import Any
@@ -326,3 +327,101 @@ def config_path() -> Path:
     from ..core.config import default_config_path
 
     return default_config_path()
+
+
+def save_macro(
+    path: Path,
+    name: str,
+    steps: Sequence[tuple[str, int, int]],
+    bind: str = "",
+    profiles: Sequence[str] = (),
+) -> None:
+    """Write one macro back into the config, touching nothing else.
+
+    Round-trip YAML for the same reason save_profiles uses it: rewriting the
+    file from the schema would delete every section this function does not know
+    about, and the config has several. Comments in particular would survive
+    neither approach.
+
+    A macro with the same name is replaced rather than appended to, because two
+    macros sharing a name is ambiguous about which one a trigger plays.
+
+    `profiles` names the profiles that should carry their own copy. Each gets the
+    same steps under the same name, which is how a macro can be bound to one key
+    everywhere and another inside a game.
+    """
+    if HAVE_ROUND_TRIP:
+        text = path.read_text(encoding="utf-8") if path.is_file() else ""
+        yaml = _yaml_for(text)
+        existing = yaml.load(text) if text else None
+        data = existing if existing is not None else {}
+        if not isinstance(data, dict):
+            data = {}
+    else:
+        yaml = None
+        data = load_raw(path)
+
+    def as_list() -> list[dict[str, Any]]:
+        out: list[dict[str, Any]] = []
+        for profile in profiles:
+            for entry in (data.get("profiles") or []):
+                if isinstance(entry, dict) and entry.get("name") == profile:
+                    out.append(entry)
+        return out
+
+    entry: dict[str, Any] = {
+        "name": name,
+        "bind": bind,
+        "steps": [
+            {"key": key, "gap_ms": int(gap), "hold_ms": int(hold)} for key, gap, hold in steps
+        ],
+    }
+
+    def put(container: dict[str, Any]) -> None:
+        existing_list = [m for m in (container.get("macros") or []) if isinstance(m, dict)]
+        kept = [m for m in existing_list if m.get("name") != name]
+        # Appended at the end so the file reads in the order things were made.
+        kept.append(entry)
+        container["macros"] = kept
+
+    if not profiles:
+        put(data)
+    else:
+        touched = as_list()
+        if not touched:
+            # Fall back to writing it globally rather than dropping the
+            # recording. The warning says so plainly, because a macro bound to a
+            # key and placed globally is live everywhere, which is not what
+            # --in-profile asked for and has to be visible in the terminal.
+            print(
+                f"periferia: no profile named {', '.join(profiles)},"
+                " so the macro was saved globally instead and will apply"
+                " in every window. Check the profile name.",
+                file=sys.stderr,
+            )
+        for profile in touched:
+            put(profile)
+        if touched:
+            return _dump(path, data, yaml)
+    put(data)
+    return _dump(path, data, yaml)
+
+
+def _dump(path: Path, data: dict[str, Any], yaml: Any) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if yaml is not None:
+        with path.open("w", encoding="utf-8") as fh:
+            yaml.dump(data, fh)
+    else:
+        import yaml as pyyaml
+
+        path.write_text(pyyaml.safe_dump(data, sort_keys=False), encoding="utf-8")
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if yaml is not None:
+        with path.open("w", encoding="utf-8") as fh:
+            yaml.dump(data, fh)
+    else:
+        import yaml as pyyaml
+
+        path.write_text(pyyaml.safe_dump(data, sort_keys=False), encoding="utf-8")

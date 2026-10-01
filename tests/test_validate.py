@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import pytest
 
+from periferia.core import config as config_mod
 from periferia.core import validate
 from periferia.core.config import ProfileConfig
 
@@ -227,3 +228,104 @@ def test_a_disabled_fallback_does_not_count_as_a_fallback() -> None:
         ]
     )
     assert any("gets no remap at all" in p.message for p in report.problems)
+
+
+class TestCheckMacros:
+    """The macro validator.
+
+    Everything here is about catching a macro that looks fine in the file and
+    does nothing on the keyboard, which is the failure nobody notices until they
+    press the key in a match.
+    """
+
+    def _macro(self, name="m", bind="KEY_F5", keys=("KEY_H",), **kw):
+        return config_mod.MacroConfig(
+            name=name,
+            bind=bind,
+            steps=[
+                config_mod.MacroStep(key=k, gap_ms=kw.get("gap", 0), hold_ms=kw.get("hold", 40))
+                for k in keys
+            ],
+            **({"enabled": kw["enabled"]} if "enabled" in kw else {}),
+        )
+
+    def _check(self, macros, profiles=(), reserved=("KEY_F12", "KEY_GRAVE")):
+        report = validate.check_macros(list(macros), list(profiles), reserved=list(reserved))
+        return [p for p in report.problems if p.level == validate.ERROR]
+
+    def test_a_good_macro_has_no_problems(self):
+        assert self._check([self._macro()]) == []
+
+    def test_nothing_configured_is_fine(self):
+        assert self._check([]) == []
+
+    def test_an_unknown_key_name_is_an_error(self):
+        errors = self._check([self._macro(keys=("KEY_MUHLE_FN",))])
+        assert len(errors) == 1
+        assert "KEY_MUHLE_FN" in errors[0].message
+
+    def test_an_unknown_bind_name_is_an_error(self):
+        assert self._check([self._macro(bind="KEY_NOPE")])
+
+    def test_a_macro_bound_to_a_reserved_key_is_refused(self):
+        """It would fire while the panic was busy stopping things."""
+        errors = self._check([self._macro(bind="KEY_F12")])
+        assert errors
+        assert "KEY_F12" in errors[0].message
+
+    def test_a_macro_that_plays_a_reserved_key_is_refused(self):
+        """Otherwise the macro would open the microphone every time it played."""
+        assert self._check([self._macro(keys=("KEY_GRAVE",))])
+
+    def test_two_macros_on_the_same_key_are_reported(self):
+        errors = self._check([self._macro(name="one"), self._macro(name="two")])
+        assert len(errors) == 1
+        # The offending macro is named in 'where', the one it collides with in
+        # the message, so both have to appear for the report to be actionable.
+        assert "two" in errors[0].where
+        assert "one" in errors[0].message
+        assert "KEY_F5" in errors[0].message
+
+    def test_two_macros_on_different_keys_are_fine(self):
+        assert self._check([self._macro(name="one"), self._macro(name="two", bind="KEY_F6")]) == []
+
+    def test_a_macro_with_no_steps_is_a_warning_not_an_error(self):
+        report = validate.check_macros([self._macro(keys=())], [], reserved=["KEY_F12"])
+        assert [p for p in report.problems if p.level == validate.ERROR] == []
+        assert any(p.level == validate.WARNING for p in report.problems)
+
+    def test_a_macro_on_no_key_is_a_warning_not_an_error(self):
+        """It is kept and can still be played by name."""
+        report = validate.check_macros([self._macro(bind="")], [], reserved=["KEY_F12"])
+        assert [p for p in report.problems if p.level == validate.ERROR] == []
+        assert any(p.level == validate.WARNING for p in report.problems)
+
+    def test_a_profile_may_override_the_global_macro_of_the_same_name(self):
+        """The whole point of per-profile macros. Flagging this as a duplicate
+        would make the feature impossible to use."""
+        profile = config_mod.ProfileConfig(
+            name="game",
+            enabled=True,
+            macros=[self._macro(name="m", bind="KEY_F6", keys=("KEY_I",))],
+        )
+        assert self._check([self._macro(name="m")], [profile]) == []
+
+    def test_two_macros_of_one_name_inside_a_profile_are_reported(self):
+        profile = config_mod.ProfileConfig(
+            name="game",
+            enabled=True,
+            macros=[self._macro(name="a"), self._macro(name="a", bind="KEY_F6")],
+        )
+        assert self._check([], [profile])
+
+    def test_a_disabled_macro_is_not_reported(self):
+        """It will not play, so complaining about its key wastes the report."""
+        assert self._check([self._macro(enabled=False)]) == []
+
+    def test_an_empty_name_is_reported(self):
+        assert self._check([self._macro(name="")])
+
+    def test_the_report_knows_whether_anything_will_work(self):
+        report = validate.check_macros([self._macro(), self._macro(name="b", bind="KEY_NOPE")], [])
+        assert report.ok is False
+        assert validate.check_macros([self._macro()], []).ok is True

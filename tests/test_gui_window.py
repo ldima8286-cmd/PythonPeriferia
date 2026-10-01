@@ -41,21 +41,21 @@ def test_shows_the_daemon_state(app, tmp_path):
     os.environ["XDG_RUNTIME_DIR"] = str(tmp_path)
     state_mod.write(state_mod.LATCHED, source="PeriferiaMic")
     window = _window(app, tmp_path, "ptt:\n  ptt_key: KEY_GRAVE\n")
-    assert window.banner.title.text() == "Микрофон залип"
+    assert window.status_page.big.text() == "Микрофон залип"
 
 
 def test_says_so_when_the_daemon_is_down(app, tmp_path):
     os.environ["XDG_RUNTIME_DIR"] = str(tmp_path)
     state_mod.clear()
     window = MainWindow(tmp_path / "config.yaml")
-    assert window.banner.title.text() == "Демон не запущен"
+    assert window.status_page.big.text() == "Демон не запущен"
 
 
 def test_shows_the_configured_keys(app, tmp_path):
     window = _window(
         app, tmp_path, "ptt:\n  ptt_key: KEY_GRAVE\n  panic_key: KEY_F12\n"
     )
-    detail = window.banner.detail.text()
+    detail = window.status_page.detail.text()
     assert "GRAVE" in detail
     assert "F12" in detail
 
@@ -144,7 +144,7 @@ def test_shows_the_russian_letter_for_keys(app, tmp_path):
         "ptt:\n  ptt_key: KEY_GRAVE\nprofiles:\n  - name: game\n    remap:\n"
         "      KEY_GRAVE: KEY_F13\n",
     )
-    assert window.banner.detail.text().startswith("PTT: Ё (GRAVE)")
+    assert window.status_page.detail.text().startswith("PTT: Ё (GRAVE)")
     source = window.editor.table.cellWidget(0, 0)
     assert source.currentText() == "Ё (GRAVE)"
 
@@ -165,3 +165,105 @@ def test_picker_can_be_typed_into(app, tmp_path):
     assert combo.isEditable()
     assert combo.insertPolicy() == combo.InsertPolicy.NoInsert
     assert combo.completer().filterMode().name == "MatchContains"
+
+
+def test_sidebar_lists_the_questions_in_order(app, tmp_path):
+    window = MainWindow(tmp_path / "config.yaml")
+    names = [window.nav.item(i).text() for i in range(window.nav.count())]
+    assert names == ["Состояние", "Профили", "Клавиши", "Проверка"]
+
+
+def test_choosing_a_page_in_the_sidebar_shows_it(app, tmp_path):
+    window = MainWindow(tmp_path / "config.yaml")
+    assert window.stack.currentWidget() is window.status_page
+    window.nav.setCurrentRow(1)
+    assert window.stack.currentWidget() is window.profiles_page
+    window.nav.setCurrentRow(3)
+    assert window.stack.currentWidget() is window.diagnostics_page
+
+
+def test_status_page_names_the_press_to_talk_key_in_russian(app, tmp_path):
+    window = _window(app, tmp_path, "ptt:\n  ptt_key: KEY_GRAVE\n")
+    assert window.status_page.ptt_value.text() == "Ё (GRAVE)"
+    assert window.status_page.detail.text().startswith("PTT: Ё (GRAVE)")
+
+
+def test_profiles_page_says_what_each_profile_does(app, tmp_path):
+    window = _window(
+        app,
+        tmp_path,
+        "profiles:\n"
+        "  - name: game\n"
+        "    match:\n"
+        "      resource_class: steam\n"
+        "    remap:\n"
+        "      KEY_A: KEY_B\n"
+        "  - name: rest\n",
+    )
+    page = window.profiles_page.list
+    rows = [page.item(i).text() for i in range(page.count())]
+    assert "game" in rows[0]
+    assert "resource_class=steam" in rows[0]
+    assert "1 переназначений" in rows[0]
+    assert "запасной, для всего остального" in rows[1]
+
+
+def test_profiles_page_marks_a_disabled_profile_rather_than_hiding_it(app, tmp_path):
+    window = _window(
+        app,
+        tmp_path,
+        "profiles:\n  - name: game\n    enabled: false\n    match:\n      resource_class: steam\n",
+    )
+    text = window.profiles_page.list.item(0).text()
+    assert "выключен" in text
+
+
+def test_diagnostics_page_shows_the_problems_the_validator_found(app, tmp_path):
+    window = _window(
+        app,
+        tmp_path,
+        "profiles:\n"
+        "  - name: game\n"
+        "    match:\n"
+        "      clas: steam\n"
+        "    remap:\n"
+        "      KEY_A: KEY_B\n",
+    )
+    page = window.diagnostics_page.list
+    joined = "\n".join(page.item(i).text() for i in range(page.count()))
+    assert "error" in joined
+    assert "clas" in joined
+
+
+def test_diagnostics_page_says_so_when_nothing_is_wrong(app, tmp_path):
+    window = _window(
+        app,
+        tmp_path,
+        "profiles:\n"
+        "  - name: game\n"
+        "    match:\n"
+        "      resource_class: steam\n"
+        "    remap:\n"
+        "      KEY_A: KEY_B\n"
+        "  - name: rest\n"
+        "    remap:\n"
+        "      KEY_C: KEY_D\n",
+    )
+    assert window.diagnostics_page.list.count() == 1
+    assert "Замечаний нет." in window.diagnostics_page.list.item(0).text()
+
+
+def test_diagnostics_page_warns_when_nothing_catches_other_windows(app, tmp_path):
+    window = _window(
+        app,
+        tmp_path,
+        "profiles:\n"
+        "  - name: game\n"
+        "    match:\n"
+        "      resource_class: steam\n"
+        "    remap:\n"
+        "      KEY_A: KEY_B\n",
+    )
+    page = window.diagnostics_page.list
+    joined = "\n".join(page.item(i).text() for i in range(page.count()))
+    assert "gets no remap at all" in joined

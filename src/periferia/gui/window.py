@@ -24,8 +24,10 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QHeaderView,
     QLabel,
+    QListWidget,
     QMainWindow,
     QPushButton,
+    QStackedWidget,
     QStatusBar,
     QTableWidget,
     QTableWidgetItem,
@@ -35,7 +37,9 @@ from PySide6.QtWidgets import (
 
 from ..core.config import Config, load
 from ..modules.remap import RemapError
-from . import model
+from . import model, pages
+
+PAGES = ("Состояние", "Профили", "Клавиши", "Проверка")
 
 log = logging.getLogger("periferia.gui")
 
@@ -49,32 +53,6 @@ STATE_COLOURS = {
     "CLOSED": "#5f6368",
     "unknown": "#5f6368",
 }
-
-
-class StateBanner(QFrame):
-    """The one thing worth seeing from across the room."""
-
-    def __init__(self) -> None:
-        super().__init__()
-        self.setObjectName("banner")
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(16, 12, 16, 12)
-        self.title = QLabel()
-        self.title.setObjectName("banner-title")
-        self.detail = QLabel()
-        self.detail.setObjectName("banner-detail")
-        layout.addWidget(self.title)
-        layout.addWidget(self.detail)
-
-    def show_status(self, status: model.MicStatus, ptt: str, panic: str) -> None:
-        self.title.setText(status.text)
-        colour = STATE_COLOURS.get(status.state, STATE_COLOURS["unknown"])
-        self.setStyleSheet(
-            f"#banner {{ background: {colour}; border-radius: 8px; }}"
-            f"#banner-title {{ color: #ffffff; font-size: 20px; font-weight: 600; }}"
-            f"#banner-detail {{ color: #eeeeee; font-size: 12px; }}"
-        )
-        self.detail.setText(status.describe(ptt, panic))
 
 
 class RemapEditor(QWidget):
@@ -194,39 +172,47 @@ class WindowPaths:
 
 
 class MainWindow(QMainWindow):
+    """A sidebar and four pages, in the order they get asked for.
+
+    Which page is showing is the only thing this class decides that matters.
+    Status first because it is the question people open this with, validation
+    last because it is a question people ask only once something looks wrong.
+    """
+
     def __init__(self, config_path: Path | None = None) -> None:
         super().__init__()
         self.setWindowTitle("Periferia")
-        self.resize(560, 460)
+        self.resize(720, 520)
         self._config_path = config_path or model.config_path()
         self._cfg = _load_or_default(self._config_path)
-        self._ptt = model.resolve_label(self._cfg.ptt.ptt_key)
-        panic = self._cfg.ptt.panic_key
-        self._panic = model.resolve_label(panic) if panic else ""
 
         central = QWidget()
-        layout = QVBoxLayout(central)
-        layout.setContentsMargins(18, 18, 18, 18)
-        layout.setSpacing(14)
+        shell = QHBoxLayout(central)
+        shell.setContentsMargins(14, 14, 14, 14)
+        shell.setSpacing(16)
 
-        self.banner = StateBanner()
-        layout.addWidget(self.banner)
+        self.nav = QListWidget()
+        self.nav.setFixedWidth(148)
+        self.nav.setFrameShape(QFrame.Shape.NoFrame)
+        for name in PAGES:
+            self.nav.addItem(name)
+        shell.addWidget(self.nav)
 
-        heading = QLabel("Профиль клавиатуры")
-        heading.setStyleSheet("font-size: 15px; font-weight: 600;")
-        layout.addWidget(heading)
-
-        note = QLabel(
-            "Переназначение физической клавиши. PTT продолжает работать по исходной "
-            "клавише, а рабочий стол увидит новую."
-        )
-        note.setWordWrap(True)
-        note.setStyleSheet("color: #5f6368;")
-        layout.addWidget(note)
-
-        self.editor = RemapEditor(on_change=self._save)
-        layout.addWidget(self.editor)
-
+        self.stack = QStackedWidget()
+        self.status_page = pages.StatusPage()
+        self.profiles_page = pages.ProfilesPage()
+        self.keys_page = self._build_keys_page()
+        self.diagnostics_page = pages.DiagnosticsPage()
+        for page in (
+            self.status_page,
+            self.profiles_page,
+            self.keys_page,
+            self.diagnostics_page,
+        ):
+            self.stack.addWidget(page)
+        shell.addWidget(self.stack, 1)
+        self.nav.currentRowChanged.connect(self.stack.setCurrentIndex)
+        self.nav.setCurrentRow(0)
         self.setCentralWidget(central)
         self.setStatusBar(QStatusBar())
 
@@ -237,10 +223,31 @@ class MainWindow(QMainWindow):
 
         self._load()
         self._refresh()
+        self._recheck()
+        self.diagnostics_page.recheck.clicked.connect(self._recheck)
 
         self._timer = QTimer(self)
         self._timer.timeout.connect(self._refresh)
         self._timer.start(POLL_MS)
+
+    def _build_keys_page(self) -> QWidget:
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(12)
+        heading = QLabel("Переназначение клавиш")
+        heading.setStyleSheet(pages.TITLE_STYLE)
+        layout.addWidget(heading)
+        note = QLabel(
+            "Переназначение физической клавиши. PTT продолжает работать по исходной "
+            "клавише, а рабочий стол увидит новую."
+        )
+        note.setWordWrap(True)
+        note.setStyleSheet(pages.NOTE_STYLE)
+        layout.addWidget(note)
+        self.editor = RemapEditor(on_change=self._save)
+        layout.addWidget(self.editor, 1)
+        return page
 
     def _load(self) -> None:
         self.editor.set_rows(model.rows_from_profiles(self._cfg.profiles))
@@ -254,12 +261,22 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage(f"Не сохранено: {exc}", 6000)
             return
         self._cfg = _load_or_default(self._config_path)
+        self._recheck()
         self.statusBar().showMessage("Сохранено. Демон подхватит при перезапуске.", 4000)
         if message:
             self.editor.warning.setText(message)
 
     def _refresh(self) -> None:
-        self.banner.show_status(model.read_status(), self._ptt, self._panic)
+        self.status_page.refresh(self._cfg)
+
+    def _recheck(self) -> None:
+        """Deliberately not on the timer.
+
+        Rebuilding the problem list twice a second would throw away the scroll
+        position of anyone in the middle of reading it.
+        """
+        self.profiles_page.refresh(self._cfg)
+        self.diagnostics_page.refresh(self._cfg)
 
     def closeEvent(self, event: Any) -> None:
         self._timer.stop()
@@ -304,5 +321,5 @@ def main_headless() -> None:
     window = MainWindow()
     window.show()
     app.processEvents()
-    print(f"окно построено: {window.windowTitle()!r} / {window.banner.title.text()!r}")
+    print(f"окно построено: {window.windowTitle()!r} / {window.status_page.big.text()!r}")
     print(f"строк в редакторе: {window.editor.table.rowCount()}")

@@ -215,6 +215,18 @@ def check_profiles(
                 " the first one and the rest are never used",
             )
         )
+    elif profiles and not any(
+        not (getattr(p, "match", None) or {}) and getattr(p, "enabled", True)
+        for p in profiles
+    ):
+        found.append(
+            Problem(
+                WARNING,
+                "profiles",
+                "no profile will catch every other window, so anything unmatched"
+                " gets no remap at all",
+            )
+        )
     if not profiles:
         found.append(Problem(WARNING, "profiles", "there are no profiles at all"))
 

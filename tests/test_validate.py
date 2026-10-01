@@ -80,9 +80,11 @@ class TestReachability:
             [
                 _profile("a", match={"resource_class": "steam"}, remap={"KEY_M": "KEY_N"}),
                 _profile("b", match={"resource_class": "lutris"}, remap={"KEY_P": "KEY_Q"}),
+                _profile("rest", remap={"KEY_S": "KEY_D"}),
             ]
         )
-        assert not report.warnings
+        assert not any("shadow" in p.message for p in report.problems)
+        assert not report.problems
 
     def test_a_disabled_matched_profile_is_a_warning(self) -> None:
         report = validate.check_profiles(
@@ -208,3 +210,20 @@ class TestReportShape:
         )
         assert report.ok
         assert not report.warnings
+
+
+def test_says_when_no_profile_catches_the_other_windows() -> None:
+    report = validate.check_profiles(
+        [_profile("game", match={"resource_class": "steam"}, remap={"KEY_A": "KEY_B"})]
+    )
+    assert any("gets no remap at all" in p.message for p in report.problems)
+
+
+def test_a_disabled_fallback_does_not_count_as_a_fallback() -> None:
+    report = validate.check_profiles(
+        [
+            _profile("game", match={"resource_class": "steam"}, remap={"KEY_A": "KEY_B"}),
+            _profile("rest", enabled=False, remap={"KEY_C": "KEY_D"}),
+        ]
+    )
+    assert any("gets no remap at all" in p.message for p in report.problems)

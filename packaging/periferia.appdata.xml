@@ -1,0 +1,52 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>periferia.desktop</id>
+  <metadata_license>MIT</metadata_license>
+  <project_license>MIT</project_license>
+  <name>Periferia</name>
+  <summary>Push-to-talk microphone gated by a key</summary>
+  <summary xml:lang="ru">Микрофон по клавише: говорит, пока держишь</summary>
+
+  <description>
+    <p>
+      Periferia gates your microphone behind a key. The microphone stays muted
+      until you hold the key you chose, so nothing is sent unless you are
+      deliberately talking.
+    </p>
+    <p>
+      It can also repurpose keys per application, so the same physical key does
+      one thing on the desktop and another in a game, without the game being
+      started a particular way.
+    </p>
+    <p>Features:</p>
+    <ul>
+      <li>Push to talk on any key, with a panic key to cut out immediately</li>
+      <li>Key remapping per application window</li>
+      <li>A config checker that names problems before they bite</li>
+      <li>Available as one AppImage file, nothing to install</li>
+    </ul>
+  </description>
+
+  <launchable type="desktop-id">periferia.desktop</launchable>
+  <provides>
+    <binary>periferia</binary>
+    <binary>periferia-daemon</binary>
+    <binary>periferia-gui</binary>
+  </provides>
+
+  <categories>
+    <category>AudioVideo</category>
+    <category>Audio</category>
+    <category>Utility</category>
+  </categories>
+
+  <content_rating type="oars-1.1"/>
+
+  <releases>
+    <release version="0.1.0" date="2026-10-01">
+      <description>
+        <p>First release with per-application key remapping and config checking.</p>
+      </description>
+    </release>
+  </releases>
+</component>

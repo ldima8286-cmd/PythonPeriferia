@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+# The single thing AppImage runs. Everything else in the AppDir is payload.
+set -euo pipefail
+
+HERE="$(dirname "$(readlink -f "$0")")"
+
+# The image has no idea where the user's config lives, and a bundled binary
+# that guesses gets it wrong on every machine except the one it was built on.
+export XDG_CONFIG_HOME="${XDG_CONFIG_HOME:-$HOME/.config}"
+export PATH="$HERE:${PATH}"
+
+exec "$HERE/usr/bin/periferia-gui" "$@"

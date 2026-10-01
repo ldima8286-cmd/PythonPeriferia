@@ -46,6 +46,31 @@ this file is the interface to build it on.
 
 ## Install
 
+### As one file
+
+Download `Periferia-<version>-x86_64.AppImage`, then:
+
+```bash
+chmod +x Periferia-*.AppImage
+./Periferia-*.AppImage
+```
+
+Nothing is installed. Put it anywhere and run it. To build it yourself:
+
+```bash
+bash scripts/build-appimage.sh
+```
+
+That needs network access, because it downloads PyInstaller and appimagetool,
+and it downloads nothing else: the image is built from the commit you are on.
+It refuses to run on a dirty tree, and it refuses to package a frozen build
+that does not start.
+
+To have it in the launcher, copy it to `~/Applications` (GNOME and KDE both
+read that) and it appears on its own from the desktop entry inside.
+
+### From source
+
 ```bash
 git clone https://github.com/ldima8286-cmd/PythonPeriferia
 cd PythonPeriferia
@@ -192,6 +217,20 @@ reads the keyboard, it never grabs it, so your typing keeps working normally.
 | `ptt.latch_ms` | 0 | hold this long to latch the mic open, 0 disables |
 | `ptt.max_press_ms` | 300000 | cut off a key held longer than this, 0 disables |
 | `processing.voice_detect` | true | cuts silence between phrases, turn it off if quiet words get lost |
+
+## The window
+
+Four things, in the order they get asked for:
+
+| Page | The question it answers |
+| --- | --- |
+| Состояние | Is it working right now, and what is in the way |
+| Профили | What does this do to my keys in which window |
+| Клавиши | Change a single remap |
+| Проверка | What is wrong with what I wrote |
+
+The last page is the same checks `periferia profiles` runs, so a config can be
+inspected without starting anything.
 
 ## Safety
 

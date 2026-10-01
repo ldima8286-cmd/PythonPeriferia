@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256">
+  <defs>
+    <linearGradient id="body" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#3b4252"/>
+      <stop offset="1" stop-color="#22262e"/>
+    </linearGradient>
+  </defs>
+
+  <rect x="8" y="8" width="240" height="240" rx="52" fill="url(#body)"/>
+
+  <!-- the capsule: the microphone this whole program exists to gate -->
+  <rect x="104" y="52" width="48" height="88" rx="24" fill="#e8eaed"/>
+  <path d="M80 116a48 48 0 0 0 96 0"
+        fill="none" stroke="#e8eaed" stroke-width="12" stroke-linecap="round"/>
+  <path d="M128 164v28" fill="none" stroke="#e8eaed" stroke-width="12" stroke-linecap="round"/>
+  <path d="M100 192h56" fill="none" stroke="#e8eaed" stroke-width="12" stroke-linecap="round"/>
+
+  <!-- the key being held down, which is the whole interaction -->
+  <rect x="150" y="150" width="62" height="62" rx="14" fill="#1e7d32"/>
+  <path d="M166 176h30M166 190h20"
+        fill="none" stroke="#e8f5e9" stroke-width="8" stroke-linecap="round"/>
+</svg>

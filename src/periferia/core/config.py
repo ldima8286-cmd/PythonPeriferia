@@ -80,6 +80,8 @@ class ProfileConfig:
     resource name as the compositor reports them. A profile with no `match` is
     the fallback for everything nothing else claimed.
 
+    Each criterion takes one value or a list of them.
+
     `match` deliberately has no way to name a window by caption. Captions change
     with the window's contents, so a profile matched on one would apply and stop
     applying as the same program showed different text.
@@ -87,7 +89,7 @@ class ProfileConfig:
 
     name: str = "default"
     enabled: bool = True
-    match: dict[str, str] = dataclasses.field(default_factory=dict)
+    match: dict[str, str | list[str]] = dataclasses.field(default_factory=dict)
     remap: dict[str, str] = dataclasses.field(default_factory=dict)
 
 

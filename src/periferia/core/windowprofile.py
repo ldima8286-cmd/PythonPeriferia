@@ -40,23 +40,32 @@ def _same(left: str | None, right: str | None) -> bool:
     return left.strip().casefold() == right.strip().casefold()
 
 
+def _any_same(window_value: str | None, wanted: str | list[str]) -> bool:
+    if isinstance(wanted, str):
+        return _same(window_value, wanted)
+    return any(_same(window_value, one) for one in wanted)
+
+
 def matches(profile: ProfileConfig, window: Window) -> bool:
     """Every criterion the profile states must hold. An empty one matches nothing.
 
     A profile that names no window is a fallback, not a match, and is handled
     separately. Treating it as a match would make it win over every real
     profile simply by being listed first.
+
+    A criterion may be one value or a list of them. Steam, Lutris and Heroic all
+    launch the same game and should share one profile, and writing that as three
+    near-identical profiles is how they drift apart.
     """
     if not profile.match:
         return False
-    if profile.match.get("resource_class") and not _same(
-        window.resource_class, profile.match["resource_class"]
-    ):
-        return False
-    return not (
-        profile.match.get("resource_name")
-        and not _same(window.resource_name, profile.match["resource_name"])
-    )
+    for key, wanted in profile.match.items():
+        if not wanted:
+            continue
+        got = getattr(window, key, None)
+        if not _any_same(got, wanted):
+            return False
+    return True
 
 
 def fallback(profiles: list[ProfileConfig]) -> ProfileConfig | None:

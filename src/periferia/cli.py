@@ -14,7 +14,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from .core import activewindow, envcheck, pipewire
+from .core import activewindow, envcheck, pipewire, validate
 from .core import config as config_mod
 from .core import state as state_mod
 from .modules import audio as audio_mod
@@ -24,6 +24,7 @@ RESET = "\033[0m"
 DIM = "\033[2m"
 BOLD = "\033[1m"
 GREEN = "\033[32m"
+RED = "\033[31m"
 YELLOW = "\033[33m"
 CYAN = "\033[36m"
 
@@ -126,6 +127,35 @@ def cmd_pick_key(args: argparse.Namespace) -> int:
         for dev in opened.values():
             with contextlib.suppress(OSError):
                 dev.close()
+    return 1
+
+
+def cmd_profiles(args: argparse.Namespace) -> int:
+    conf = config_mod.load(args.config)
+    report = validate.check_profiles(
+        conf.profiles,
+        reserved=[conf.ptt.ptt_key, conf.ptt.panic_key],
+    )
+    print(f"{BOLD}profiles{RESET}")
+    if not conf.profiles:
+        print(f"  {DIM}none configured{RESET}")
+    for profile in conf.profiles:
+        match = ", ".join(f"{k}={v}" for k, v in (profile.match or {}).items()) or "fallback"
+        off = "" if profile.enabled else f" {DIM}(disabled){RESET}"
+        keys = len(profile.remap)
+        print(f"  {profile.name:16} {match}{off} {DIM}{keys} keys{RESET}")
+    if not report.problems:
+        print(f"\n  {_c('nothing to report', GREEN)}")
+        return 0
+    print()
+    for problem in report.problems:
+        colour = RED if problem.level == validate.ERROR else YELLOW
+        print(f"  {_c(problem.level, colour)}  {problem.where}: {problem.message}")
+    print()
+    if not report.ok:
+        print(f"  {_c(f'{len(report.errors)} that will stop it working', RED)}")
+    if report.warnings:
+        print(f"  {_c(f'{len(report.warnings)} worth knowing', YELLOW)}")
     return 1
 
 
@@ -533,6 +563,11 @@ def build_parser() -> argparse.ArgumentParser:
     gate.add_argument("source", nargs="?", help="source to watch, defaults to the daemon's")
     gate.add_argument("--timeout", type=float, default=30.0, help="seconds to wait, default 30")
     gate.set_defaults(func=cmd_gate_check)
+    sub.add_parser(
+        "profiles",
+        help="show the configured profiles and what is wrong with them",
+    ).set_defaults(func=cmd_profiles)
+
     probe = sub.add_parser(
         "probe-window",
         help="find out whether the compositor can name the focused window",

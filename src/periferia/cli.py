@@ -22,6 +22,7 @@ from .core import state as state_mod
 from .gui import model
 from .modules import audio as audio_mod
 from .modules import hotkey, macrodevice
+from .modules.remap import DISABLED_TARGETS
 
 RESET = "\033[0m"
 DIM = "\033[2m"
@@ -418,8 +419,18 @@ def cmd_profiles(args: argparse.Namespace) -> int:
         match = ", ".join(f"{k}={v}" for k, v in (profile.match or {}).items()) or "fallback"
         off = "" if profile.enabled else f" {DIM}(disabled){RESET}"
         keys = len(profile.remap)
-        print(f"  {profile.name:16} {match}{off} {DIM}{keys} keys{RESET}")
+        # A key turned off is a hole in the keyboard, so it is named here rather
+        # than only counted with the remaps.
+        killed = [str(k) for k, v in (profile.remap or {}).items() if _is_off(v)]
+        suffix = f" {DIM}{keys} keys" + (f", {len(killed)} off{RESET}" if killed else "")
+        names = f" {DIM}({' '.join(killed)}){RESET}" if killed else ""
+        print(f"  {profile.name:16} {match}{off} {suffix}{names}")
     return _print_report(report)
+
+
+def _is_off(target: object) -> bool:
+    """Whether a remap target means "this key does not exist"."""
+    return str(target).strip().lower() in DISABLED_TARGETS
 
 
 def cmd_probe_window(args: argparse.Namespace) -> int:

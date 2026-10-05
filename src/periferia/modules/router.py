@@ -69,7 +69,7 @@ class KeyAction:
 
 def plan(
     events: Sequence[tuple[int, int, int]],
-    table: Mapping[int, int],
+    table: Mapping[int, int | None],
     watch: frozenset[int],
     ignore_repeat: bool = True,
 ) -> tuple[list[tuple[int, int, int]], list[KeyAction]]:
@@ -77,6 +77,11 @@ def plan(
 
     The two halves come from the same batch but answer different questions: the
     desktop gets the table applied, the application gets what the finger did.
+
+    A key the profile kills produces neither. Disabling a key that still opened
+    the microphone or played a macro would be a profile that does one thing on
+    the way to the desktop and another on the way to us, and the only place that
+    would be noticed is a game with a hotkey on it.
 
     Auto-repeat is always forwarded, because holding a remapped key has to keep
     typing. It just must not count as a fresh press, or holding push-to-talk
@@ -87,6 +92,8 @@ def plan(
     actions: list[KeyAction] = []
     for ev_type, code, value in events:
         if ev_type != ecodes.EV_KEY or code not in watch:
+            continue
+        if table.get(code, code) is None:
             continue
         if ignore_repeat and value == 2:
             continue
@@ -118,7 +125,7 @@ class KeyboardRouter:
         *,
         panic_code: int | None = None,
         ignore_repeat: bool = True,
-        table: Mapping[int, int] | None = None,
+        table: Mapping[int, int | None] | None = None,
         on_press: Callable[[], None] | None = None,
         on_release: Callable[[], None] | None = None,
         on_panic: Callable[[], None] | None = None,

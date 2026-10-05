@@ -39,6 +39,17 @@ class RemapError(ValueError):
     """A remap table that cannot be applied safely."""
 
 
+# What a target may be written as when the key should not exist at all. Read
+# before any key name so "none" is never mistaken for one.
+DISABLED_TARGETS = frozenset({"none", "off", "disable", "disabled", "-"})
+
+# A remap maps a code to the code to emit instead, or to None for a key that
+# emits nothing at all. None is the point of the type: "disabled" and "mapped to
+# something" are both things a profile can say about a key, and a second
+# parallel dict would let them disagree.
+RemapTable = dict[int, "int | None"]
+
+
 def held_modifier_codes() -> frozenset[int]:
     """Modifiers that stay pressed while held.
 
@@ -51,8 +62,13 @@ def held_modifier_codes() -> frozenset[int]:
     )
 
 
-def build_remap(pairs: Mapping[str, str]) -> dict[int, int]:
+def build_remap(pairs: Mapping[str, str]) -> dict[int, int | None]:
     """Turn a table of key names into a table of codes, or refuse it.
+
+    A target of `none` (also `off`, `disable`, `-`) disables the key: nothing is
+    emitted for it at all. That is the one part of this table with no way to
+    notice it went wrong, so the key has to be named for a reason and the log
+    says which ones went dead.
 
     Held modifiers are refused outright rather than half supported. Emitting one
     onto a virtual device means keeping a shadow copy of the desktop's modifier
@@ -64,7 +80,7 @@ def build_remap(pairs: Mapping[str, str]) -> dict[int, int]:
         return {}
 
     modifiers = held_modifier_codes()
-    table: dict[int, int] = {}
+    table: dict[int, int | None] = {}
     seen: dict[int, str] = {}
 
     for source_name, target_name in pairs.items():
@@ -72,7 +88,16 @@ def build_remap(pairs: Mapping[str, str]) -> dict[int, int]:
         if source is None:
             raise RemapError(f"unknown source key: {source_name!r}")
 
-        target = resolve_key(str(target_name))
+        written = str(target_name).strip()
+        if written.lower() in DISABLED_TARGETS:
+            # A modifier left out is the one case where disabling is safe: it
+            # emits nothing, so it cannot be left held down on the virtual
+            # device either.
+            table[source] = None
+            seen[source] = written
+            continue
+
+        target = resolve_key(written)
         if target is None:
             raise RemapError(f"{source_name} maps to unknown target key: {target_name!r}")
 
@@ -81,7 +106,7 @@ def build_remap(pairs: Mapping[str, str]) -> dict[int, int]:
 
         if source in seen:
             raise RemapError(f"{source_name} is mapped twice in the same profile")
-        seen[source] = str(target_name)
+        seen[source] = written
 
         if source in modifiers:
             raise RemapError(
@@ -99,29 +124,39 @@ def build_remap(pairs: Mapping[str, str]) -> dict[int, int]:
     return table
 
 
-def translate_key(code: int, table: Mapping[int, int]) -> int:
+def translate_key(code: int, table: Mapping[int, int | None]) -> int | None:
+    """The code to emit for a physical key, or None if the profile kills it."""
     return table.get(code, code)
 
 
 def translate_events(
-    events: Iterable[tuple[int, int, int]], table: Mapping[int, int]
+    events: Iterable[tuple[int, int, int]], table: Mapping[int, int | None]
 ) -> list[tuple[int, int, int]]:
     """Rewrite the key code in each (type, code, value) event, passing the rest.
 
     Only EV_KEY is touched. Synch, repeat and anything else are forwarded
     untouched, since a remap changes which key is pressed, not how events are
     framed.
+
+    A key the table kills is left out entirely rather than emitted as something
+    harmless. Dropping it is the whole meaning of "disabled": the application
+    never hears of it, so it cannot be triggered by a macro, a game that reads
+    the key directly, or a held key that was already down when the profile
+    changed.
     """
     out: list[tuple[int, int, int]] = []
     for ev_type, code, value in events:
         if ev_type == ecodes.EV_KEY and code in table:
-            out.append((ev_type, table[code], value))
+            target = table[code]
+            if target is None:
+                continue
+            out.append((ev_type, target, value))
         else:
             out.append((ev_type, code, value))
     return out
 
 
-def remap_for(profile: Any) -> dict[int, int] | None:
+def remap_for(profile: Any) -> dict[int, int | None] | None:
     """Build the table for one named profile, or None if it remaps nothing.
 
     Separate from active_remap() because selecting the profile is not the same
@@ -137,7 +172,7 @@ def remap_for(profile: Any) -> dict[int, int] | None:
     return build_remap(pairs)
 
 
-def active_remap(profiles: Iterable[Any]) -> dict[int, int] | None:
+def active_remap(profiles: Iterable[Any]) -> dict[int, int | None] | None:
     """Build the table for the profile in effect, or None to leave keys alone.
 
     Only the first enabled profile is used. Selecting by focused window is

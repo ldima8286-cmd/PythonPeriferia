@@ -264,6 +264,27 @@ list of them, and every field written has to match. The first profile that
 matches wins, so put the specific ones first and leave one without a `match` at
 the end as the fallback.
 
+### Turning a key off
+
+`none` as a target means the key does not exist while the profile applies:
+
+```yaml
+  - name: game
+    remap:
+      KEY_CAPSLOCK: none      # gone entirely
+      KEY_F1: KEY_F13         # and this one moved
+```
+
+A key turned off this way produces nothing at all: the desktop does not see it,
+a macro cannot play it, and it cannot open the microphone either. The key comes
+back when you leave the window.
+
+`periferia profiles` names the keys a profile turns off, because a key that has
+gone missing is otherwise invisible, and it refuses `KEY_ESC`-style rescues in a
+profile that only applies to some windows: if that window ever fails to be
+detected, the way out stays gone. Held modifiers can be turned off even though
+they cannot be remapped, since a key that emits nothing cannot get stuck.
+
 Switching applies immediately. Rebuilding a remap table takes the keyboard for
 as long as it takes, so it is done once per switch rather than once per event,
 and only when the profile actually changes.
@@ -569,9 +590,9 @@ reports on this.
 
 - [ ] stereo to mono, if it turns out the two channels really differ
 - [ ] GUI for the config
-- [ ] input profiles: DPI and disable keys. The remap part is done, the daemon
-      picks up a changed profile while it runs, and on KWin the profile follows
-      the focused window
+- [ ] input profiles: pointer speed per profile. The keyboard side is done,
+      including turning a key off entirely, and on KWin the profile follows the
+      focused window
 - [ ] RGB control with scripts and time-of-day profiles. Needs raw HID access,
       which this machine does not expose
 - [ ] compressor and de-esser. Not going to happen here: filter-chain will not

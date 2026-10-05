@@ -329,3 +329,26 @@ class TestCheckMacros:
         report = validate.check_macros([self._macro(), self._macro(name="b", bind="KEY_NOPE")], [])
         assert report.ok is False
         assert validate.check_macros([self._macro()], []).ok is True
+
+
+class TestTurningAKeyOff:
+    """A key the profile turns off, and a target that only looks like one.
+
+    The dangerous case is a misspelling: "0ff" is not a key, but it looks like
+    it means "off", and a config that quietly disables the wrong key produces a
+    keyboard with a hole in it and nothing in the log.
+    """
+
+    def test_none_is_not_a_typo(self) -> None:
+        report = validate.check_profiles([_profile(remap={"KEY_CAPSLOCK": "none"})])
+        assert [str(p) for p in report.errors] == []
+
+    @pytest.mark.parametrize("written", ["0ff", "nof", "disble", "offf", "nope"])
+    def test_a_misspelled_off_is_reported_as_an_unknown_key(self, written: str) -> None:
+        report = validate.check_profiles([_profile(remap={"KEY_CAPSLOCK": written})])
+        assert len(report.errors) == 1
+        assert "To turn a key off write none" in str(report.errors[0])
+
+    def test_a_real_target_is_still_fine(self) -> None:
+        report = validate.check_profiles([_profile(remap={"KEY_CAPSLOCK": "KEY_ESC"})])
+        assert [str(p) for p in report.errors] == []

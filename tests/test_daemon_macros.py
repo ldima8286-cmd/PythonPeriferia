@@ -1093,3 +1093,32 @@ class _RefusingWatcher:
 
     def drain(self):
         return None
+
+
+def test_a_disabled_key_is_named_in_the_log(caplog) -> None:
+    """A key that stops existing is otherwise silent, and the only way to find
+    it is to remember that it used to be there."""
+    import logging
+
+    from src.periferia.core.daemon import _log_disabled
+
+    caps = resolve_key("KEY_CAPSLOCK")
+    f1 = resolve_key("KEY_F1")
+    with caplog.at_level(logging.INFO):
+        _log_disabled({caps: None, f1: resolve_key("KEY_F13")})
+
+    said = " ".join(record.getMessage() for record in caplog.records)
+    assert "CAPSLOCK" in said
+    assert "F13" not in said
+
+
+def test_a_table_with_nothing_disabled_says_nothing(caplog) -> None:
+    import logging
+
+    from src.periferia.core.daemon import _log_disabled
+
+    with caplog.at_level(logging.INFO):
+        _log_disabled({resolve_key("KEY_CAPSLOCK"): resolve_key("KEY_ESC")})
+        _log_disabled(None)
+
+    assert not [r for r in caplog.records if "turned off" in r.getMessage()]

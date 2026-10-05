@@ -107,12 +107,19 @@ log:
 #     - name: game
 #       match: { resource_class: [steam, lutris, heroic] }
 #       remap:
-#         KEY_CAPSLOCK: KEY_TAB
-#         KEY_F1: KEY_F13
+#         KEY_CAPSLOCK: none      # gone in this window
+#         KEY_F1: KEY_TAB
+#         KEY_F2: KEY_F13
 #
-# Modifiers that stay held (shift, ctrl, alt, meta) are refused, because a
-# virtual device that emits a held modifier can leave it stuck down. Lock keys
-# are fine. Key names are physical, so "Й" is the key labelled Q in latin.
+# A target of `none` (also off, disable, -) turns the key off: nothing is
+# emitted for it at all, not to the desktop and not to a macro. The key comes
+# back when you leave the window. The keys that go are named by
+# `periferia profiles`, because a missing key says nothing by itself.
+#
+# Modifiers that stay held (shift, ctrl, alt, meta) cannot be remapped, because
+# a virtual device that emits a held modifier can leave it stuck down. They can
+# be turned off, since a key that emits nothing cannot get stuck. Lock keys are
+# fine. Key names are physical, so "Й" is the key labelled Q in latin.
 
 # Macros: recorded keypresses replayed by one key. Purely a keyboard feature, it
 # has nothing to do with the microphone. Press `periferia macro check` after

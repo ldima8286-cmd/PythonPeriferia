@@ -8,11 +8,13 @@ from evdev import ecodes
 from src.periferia.modules.remap import (
     Profile,
     RemapError,
+    active_remap,
     build_remap,
     held_modifier_codes,
     translate_events,
     translate_key,
 )
+from src.periferia.modules.router import plan
 
 
 def code(name: str) -> int:
@@ -25,6 +27,10 @@ class _Entry:
     def __init__(self, enabled: bool, remap: dict[str, str]) -> None:
         self.enabled = enabled
         self.remap = remap
+
+
+def _profile(remap: dict[str, str]) -> _Entry:
+    return _Entry(True, remap)
 
 
 class TestBuildRemap:
@@ -174,3 +180,76 @@ class TestActiveRemap:
 
         with pytest.raises(RemapError):
             active_remap([_Entry(enabled=True, remap={"KEY_A": "KEY_LEFTSHIFT"})])
+
+
+class TestDisablingAKey:
+    """A key a profile turns off has to be gone, not renamed.
+
+    Nothing about a swallowed key announces itself, so the only place a mistake
+    here is visible is the key that still works when it should not.
+    """
+
+    def test_none_means_the_key_emits_nothing(self) -> None:
+        caps = code("KEY_CAPSLOCK")
+        table = build_remap({"KEY_CAPSLOCK": "none"})
+        assert table == {caps: None}
+
+    @pytest.mark.parametrize("written", ["none", "NONE", " off ", "disable", "-"])
+    def test_every_spelling_of_off_means_the_same(self, written: str) -> None:
+        caps = code("KEY_CAPSLOCK")
+        assert build_remap({"KEY_CAPSLOCK": written}) == {caps: None}
+
+    def test_a_disabled_event_is_left_out_entirely(self) -> None:
+        caps = code("KEY_CAPSLOCK")
+        events = [(ecodes.EV_KEY, caps, 1), (ecodes.EV_KEY, caps, 0)]
+        assert translate_events(events, {caps: None}) == []
+
+    def test_other_keys_still_come_through(self) -> None:
+        caps = code("KEY_CAPSLOCK")
+        esc = code("KEY_ESC")
+        events = [(ecodes.EV_KEY, caps, 1), (ecodes.EV_KEY, esc, 1)]
+        assert translate_events(events, {caps: None}) == [(ecodes.EV_KEY, esc, 1)]
+
+    def test_synch_survives_a_disabled_key(self) -> None:
+        caps = code("KEY_CAPSLOCK")
+        events = [(ecodes.EV_SYN, 0, 0), (ecodes.EV_KEY, caps, 1)]
+        assert translate_events(events, {caps: None}) == [(ecodes.EV_SYN, 0, 0)]
+
+    def test_a_disabled_key_does_not_trigger_a_macro(self) -> None:
+        """Otherwise the profile does one thing to the desktop and another to
+        us, and only a game with a hotkey on it would ever say so."""
+        f5 = code("KEY_F5")
+        caps = code("KEY_CAPSLOCK")
+        watch = frozenset({f5, caps})
+        forwarded, actions = plan([(ecodes.EV_KEY, f5, 1)], {f5: None}, watch)
+        assert forwarded == []
+        assert actions == []
+
+    def test_a_disabled_key_does_not_hold_push_to_talk_open(self) -> None:
+        grave = code("KEY_GRAVE")
+        events = [(ecodes.EV_KEY, grave, 1)]
+        _, actions = plan(events, {grave: None}, frozenset({grave}))
+        assert actions == []
+
+    def test_disabling_and_remapping_coexist(self) -> None:
+        caps = code("KEY_CAPSLOCK")
+        f1 = code("KEY_F1")
+        table = build_remap({"KEY_CAPSLOCK": "none", "KEY_F1": "KEY_F13"})
+        assert table == {caps: None, f1: code("KEY_F13")}
+
+    def test_a_disabled_modifier_is_allowed_because_it_emits_nothing(self) -> None:
+        """The reason modifiers are refused is that emitting one can leave it
+        held down. Emitting nothing cannot."""
+        table = build_remap({"KEY_LEFTSHIFT": "none"})
+        assert table == {code("KEY_LEFTSHIFT"): None}
+
+    def test_a_misspelled_off_is_an_error_rather_than_a_dead_key(self) -> None:
+        """Writing "nof" instead of "off" must not quietly disable a key.
+        There is no key by that name, so it is reported like any other typo."""
+        with pytest.raises(RemapError, match="unknown target key"):
+            build_remap({"KEY_CAPSLOCK": "nof"})
+
+    def test_a_table_of_only_disabled_keys_still_counts_as_remapping(self) -> None:
+        assert active_remap([_profile({"KEY_CAPSLOCK": "none"})]) == {
+            code("KEY_CAPSLOCK"): None
+        }

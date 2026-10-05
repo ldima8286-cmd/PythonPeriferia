@@ -23,6 +23,7 @@ from ..modules.hotkey import (
     HotkeyListener,
     find_keyboards_detailed,
     is_button_code,
+    key_label,
     resolve_key,
 )
 from ..modules.macrodevice import MacroPlayer
@@ -48,7 +49,21 @@ def _remapping(listener: HotkeyListener | KeyboardRouter) -> bool:
     return bool(getattr(listener, "remapping", False))
 
 
-def _listener_table(listener: HotkeyListener | KeyboardRouter) -> dict[int, int] | None:
+def _log_disabled(table: dict[int, int | None] | None) -> None:
+    """Name the keys a profile turned off.
+
+    A disabled key has no way to announce itself: it simply stops existing, and
+    the only way to find that out is to remember that it used to. So it is said
+    out loud once, when the profile is applied.
+    """
+    killed = [key_label(code) for code, target in (table or {}).items() if target is None]
+    if killed:
+        log.info("keys turned off in this profile: %s", ", ".join(sorted(killed)))
+
+
+def _listener_table(
+    listener: HotkeyListener | KeyboardRouter,
+) -> dict[int, int | None] | None:
     """The remap table a listener is actually applying, or None if it is not one."""
     if not _remapping(listener):
         return None
@@ -83,7 +98,7 @@ class Daemon:
         self._include_pointers = False
         # The remap table currently in force, so a config reload can tell an
         # actual profile change from a save that only touched a macro.
-        self._loaded_table: dict[int, int] | None = None
+        self._loaded_table: dict[int, int | None] | None = None
         # Whether the listener currently holds the devices open. A config reload
         # rebuilds the listener and has to know whether it must reopen it.
         self._listener_open = False
@@ -215,7 +230,7 @@ class Daemon:
             log.warning("the new keyboard profile did not take, running without it")
         return True
 
-    def _table_for_now(self) -> dict[int, int] | None:
+    def _table_for_now(self) -> dict[int, int | None] | None:
         """The table that should be in force right now.
 
         The focused window decides when it can be asked, and the first enabled
@@ -231,7 +246,7 @@ class Daemon:
             return None
         return active_remap(self.cfg.profiles)
 
-    def _swap_profile(self, table: dict[int, int] | None) -> bool:
+    def _swap_profile(self, table: dict[int, int | None] | None) -> bool:
         """Rebuild the listener for a different remap table.
 
         `table` of None means "leave the keys alone", which is what a profile
@@ -362,6 +377,7 @@ class Daemon:
                 return
             self._loaded_table = _listener_table(listener)
             log.info("keyboard profile is active")
+            _log_disabled(self._loaded_table)
 
         listener.open()
         self._listener_open = True
@@ -609,7 +625,7 @@ class Daemon:
         devices: list[Path],
         code: int,
         panic: int | None,
-        table: dict[int, int] | None,
+        table: dict[int, int | None] | None,
     ) -> HotkeyListener | KeyboardRouter:
         """Build the listener for a remap table. Opening it is the caller's job.
 

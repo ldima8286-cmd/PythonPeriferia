@@ -196,6 +196,19 @@ def check_profiles(
                         f" refused when the daemon tried to apply the profile",
                     )
                 )
+            # The target is checked here as well as in build_remap because a
+            # misspelling of a word meaning "off" reads as a key that exists.
+            # Left to the daemon it becomes a key that never works, with the
+            # error in a log nobody is reading.
+            if not _is_disabled(target) and _code_of(target) is None:
+                found.append(
+                    Problem(
+                        ERROR,
+                        where,
+                        f"{source} maps to {target}, which is not a key this"
+                        f" project knows. To turn a key off write none",
+                    )
+                )
             elif present_codes is not None and code not in present_codes:
                     found.append(
                         Problem(

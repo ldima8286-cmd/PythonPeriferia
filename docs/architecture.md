@@ -16,24 +16,39 @@ It just sees a system microphone that is sometimes quiet.
 ```
 src/periferia/
   cli.py                 command line
+  tui.py                 terminal window
   core/
     config.py            dataclasses, yaml loading, validation
     pipewire.py          every pactl / wp-cli call in the project
     logging_setup.py
     envcheck.py          "can this machine run it"
+    state.py             the state file `periferia status` reads
+    macro.py             macro model, recording, playback timeline
+    keyboards.py         which keyboards, remembered across runs
+    watcher.py           notices that the config file changed
+    windowprofile.py     picks a profile for the focused window
+    activewindow.py      the compositor, where it can be asked
+    validate.py          what will not work, and why
     daemon.py            wiring and lifecycle
   modules/
     audio.py             virtual mic, volume ramp
     hotkey.py            evdev capture, key name resolution
     processing.py        module-echo-cancel properties
-  gui/                   not built yet
+    macrodevice.py       replays macros through uinput
+    remap.py             which key becomes which key
+    router.py            grabs the keyboard and remaps what it emits
+  gui/                   the window
 ```
 
-Two rules the code follows:
+Three rules the code follows:
 
 1. Nothing outside `core/pipewire.py` runs a subprocess. That keeps the
    sound server interaction in one place and makes it easy to fake in tests.
 2. `modules/` has no knowledge of each other. `daemon.py` connects them.
+3. The daemon owns everything that must survive a reload, and reloads as little
+   as possible. A config change re-reads macros and rebuilds the keyboard, and
+   leaves the microphone, the virtual source and the audio processing alone:
+   those own a PipeWire node that applications are pointed at.
 
 ## The gate
 

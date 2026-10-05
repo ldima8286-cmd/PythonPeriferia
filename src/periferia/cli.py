@@ -345,7 +345,7 @@ def _macro_finish(
         model.save_macro(
             path,
             args.name,
-            [(hotkey.code_name(s.code), s.gap_ms, s.hold_ms) for s in steps],
+            [(hotkey.code_name(s.code), s.at_ms, s.hold_ms) for s in steps],
             bind=bind,
             profiles=list(args.in_profile or ()),
         )

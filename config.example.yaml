@@ -123,8 +123,15 @@ log:
 #     rather than becoming a second macro. That is how the same key does one
 #     thing everywhere and another in one window.
 #
-# gap_ms is the pause before the key, hold_ms how long it stays down. Both come
-# from the recording, which is why a macro replays at the speed you typed.
+# at_ms is when the key goes down, counted from the start of the macro.
+# hold_ms is how long it stays down. Both come from the recording, which is why
+# a macro replays at the speed you typed.
+#
+# at_ms is measured from the start rather than from the previous key, which is
+# what lets two keys overlap: a chord is just several keys whose at_ms values
+# interleave. gap_ms, the older spelling that measured the pause after the
+# previous key, is still read so old macros keep working, but it cannot express
+# a chord and nothing new writes it.
 #
 # macros:
 #   - name: hello
@@ -132,19 +139,25 @@ log:
 #     enabled: true
 #     steps:
 #       - key: KEY_H
-#         gap_ms: 0
+#         at_ms: 0
 #         hold_ms: 40
 #       - key: KEY_I
-#         gap_ms: 90
+#         at_ms: 130
 #         hold_ms: 40
-#   - name: ts
-#     bind: KEY_F6
+#   - name: ctrl-c
+#     bind: KEY_F7
 #     steps:
-#       - key: KEY_T
-#         gap_ms: 0
+#       - key: KEY_LEFTCTRL
+#         at_ms: 0        # modifier down first
 #         hold_ms: 40
-#       - key: KEY_S
-#         gap_ms: 60
+#       - key: KEY_C
+#         at_ms: 40       # pressed while the modifier is still down
+#         hold_ms: 20
+#       - key: KEY_C
+#         at_ms: 60       # released before the modifier
+#         hold_ms: 20
+#       - key: KEY_LEFTCTRL
+#         at_ms: 80
 #         hold_ms: 40
 #
 # Inside a window, on the same name:
@@ -157,5 +170,10 @@ log:
 #         bind: KEY_F7
 #         steps:
 #           - key: KEY_M
-#             gap_ms: 0
+#             at_ms: 0
 #             hold_ms: 40
+#
+# The daemon watches this file, so saving it takes effect within about a second
+# with no restart. A new macro and a changed keyboard profile both go live. A
+# config that cannot be read is reported and ignored, and what was already
+# loaded keeps running.

@@ -277,3 +277,84 @@ class TestPollWiring:
         router.table = CAPS
         router.poll(timeout=0.05)
         assert vir.written == [(ecodes.EV_KEY, code("KEY_ESC"), 2)]
+
+
+class TestKeyboardAppearingLater:
+    """A keyboard plugged in mid-session has to be remapped like the rest.
+
+    Leaving it unremapped is the worst outcome here: every other keyboard
+    honours the profile and this one types straight through it, which is
+    harder to notice than either working or not working at all.
+    """
+
+    def _opened(self, monkeypatch):
+        from src.periferia.modules import router as router_mod
+
+        router = router_mod.KeyboardRouter([], PTT, table={})
+        existing = _FakeSource([], _Pipe())
+        router._channels = [
+            _Channel(
+                Path("/dev/input/event6"), existing, _FakeVirtual(_Pipe()), grabbed=True
+            )
+        ]
+        monkeypatch.setattr(router_mod, "uinput_available", lambda: True)
+        return router, router_mod
+
+    def test_a_new_keyboard_is_grabbed_and_remapped(self, monkeypatch):
+        router, router_mod = self._opened(monkeypatch)
+        source = _FakeSource([], _Pipe())
+        monkeypatch.setattr(router_mod, "open_device", lambda path: source)
+        virtuals = []
+
+        def make_virtual(**kwargs):
+            virtuals.append(kwargs)
+            return _FakeVirtual(_Pipe())
+
+        monkeypatch.setattr(router_mod, "UInput", make_virtual)
+        router._rescan = lambda: [Path("/dev/input/event9")]
+
+        router._pick_up_new_devices()
+
+        assert Path("/dev/input/event9") in {c.path for c in router._channels}
+        assert source.grabbed is True
+        assert len(virtuals) == 1
+
+    def test_a_new_keyboard_that_cannot_be_grabbed_changes_nothing(self, monkeypatch):
+        """All or nothing, as in open(): a half-remapped pair is worse than none."""
+        router, router_mod = self._opened(monkeypatch)
+
+        class _Busy(_FakeSource):
+            def grab(self):
+                raise OSError("device busy")
+
+        monkeypatch.setattr(router_mod, "open_device", lambda path: _Busy([], _Pipe()))
+        router._rescan = lambda: [Path("/dev/input/event9")]
+
+        router._pick_up_new_devices()
+
+        assert {c.path for c in router._channels} == {Path("/dev/input/event6")}
+
+    def test_a_keyboard_already_remapped_is_left_alone(self, monkeypatch):
+        router, router_mod = self._opened(monkeypatch)
+        monkeypatch.setattr(router_mod, "open_device", lambda path: _FakeSource([], _Pipe()))
+        router._rescan = lambda: [Path("/dev/input/event6")]
+
+        router._pick_up_new_devices()
+
+        assert len(router._channels) == 1
+
+    def test_no_lookup_happens_without_a_rescan_callback(self, monkeypatch):
+        """The picker waits for one keypress and has no reason to go hunting."""
+        router, router_mod = self._opened(monkeypatch)
+        calls = []
+
+        def should_not_run(path):
+            calls.append(path)
+            return _FakeSource([], _Pipe())
+
+        monkeypatch.setattr(router_mod, "open_device", should_not_run)
+        router._rescan = None
+
+        router._pick_up_new_devices()
+
+        assert calls == []

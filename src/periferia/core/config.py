@@ -98,15 +98,20 @@ class ProfileConfig:
 class MacroStep:
     """One keypress inside a macro, with the timing that makes it a recording.
 
-    `gap_ms` is measured from the previous key coming back up, not from the
-    previous step's start. Both are defensible, but only one of them reproduces
-    a pause the way a person took it, and recording is the whole point.
+    `at_ms` is when the key goes down, counted from the start of the macro. Two
+    keys can share one offset range, which is what lets a chord be recorded:
+    Ctrl down at 0, C down at 40, C up at 60, Ctrl up at 120.
+
+    `gap_ms` is the older timing, a pause from the previous key coming back up.
+    It is still read so that macros recorded before chords existed keep playing
+    as they did, and is written only when `at_ms` is absent.
 
     `hold_ms` exists because a key that is pressed and never released makes
     everything typed after it come out as one held modifier.
     """
 
     key: str = ""
+    at_ms: int | None = None
     gap_ms: int = 0
     hold_ms: int = 40
 

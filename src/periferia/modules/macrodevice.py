@@ -7,9 +7,14 @@ one would mean grabbing the user's physical keyboard to replay two letters.
 
 Stopping matters more than playing. A macro that types is the one thing this
 program does that cannot be taken back once it is on screen, so `stop` is
-checked between every step and again before each press, and a panic anywhere
-calls it. A macro with a five second gap in the middle is exactly the case where
-a user reaches for the panic key and expects it to work.
+checked before every event and the wait between events is interruptible. A macro
+with a five second gap in the middle is exactly the case where a user reaches
+for the panic key and expects it to work.
+
+Playback walks a timeline rather than a list of steps. A step is one key going
+down and coming back up at a known offset from the start, and the press and the
+release are separate events in that timeline, which is what lets a modifier and
+a letter be down together instead of being flattened into two taps.
 """
 
 from __future__ import annotations
@@ -21,7 +26,7 @@ from collections.abc import Callable, Sequence
 
 from evdev import UInput, ecodes
 
-from ..core.macro import Step
+from ..core.macro import Step, timeline
 
 log = logging.getLogger("periferia.macro")
 
@@ -33,6 +38,9 @@ PRODUCT = 0x0001
 # kernel's own repeat delay can be seen by the compositor as a key that was never
 # released, which some apps read as a stuck modifier.
 MIN_HOLD_S = 0.004
+# The same floor in the timeline's own milliseconds, so a release can be pushed
+# back without converting through seconds and losing sub-millisecond precision.
+MIN_HOLD_MS = 4
 # How long a replaced macro gets to notice the stop and let go before the new
 # one is refused. Waits are interruptible now, so this is a backstop rather than
 # the usual path.
@@ -47,6 +55,9 @@ class MacroPlayer:
         self._thread: threading.Thread | None = None
         self._device: UInput | None = None
         self._codes: set[int] = set()
+        # Offset at which each currently held key went down, so a release can be
+        # held back long enough to clear the kernel's repeat delay.
+        self._pressed_at: dict[int, int] = {}
         # Injectable so a test can play a whole macro without waiting for it.
         # When one is supplied _pause calls it straight through, which is what
         # keeps tests instant.
@@ -133,35 +144,44 @@ class MacroPlayer:
 
     def _run(self, steps: tuple[Step, ...]) -> None:
         device = self._ensure_device()
-        held: int | None = None
+        held: set[int] = set()
         try:
-            for step in steps:
-                if self._stop.is_set():
+            previous = 0
+            for at_ms, code, value in timeline(steps):
+                due = at_ms
+                if value == 0:
+                    # A release must not go out sooner than the kernel's repeat
+                    # delay after its own press, even when the recording says the
+                    # key was up for a moment. Some apps read that pair as one key
+                    # that never came back up and keep the modifier held for
+                    # everything typed after it.
+                    due = max(due, self._pressed_at.get(code, at_ms) + MIN_HOLD_MS)
+                wait = (due - previous) / 1000.0
+                if wait > 0 and not self._pause(wait):
                     log.info("macro playback stopped")
                     return
-                if step.gap_ms and not self._pause(step.gap_ms / 1000.0):
-                    log.info("macro playback stopped")
-                    return
-                device.write(ecodes.EV_KEY, step.code, 1)
+                device.write(ecodes.EV_KEY, code, value)
                 device.syn()
-                held = step.code
-                if not self._pause(max(step.hold_ms / 1000.0, MIN_HOLD_S)):
-                    # The finally block releases whatever is held, so stopping
-                    # mid-hold does not leave a key stuck down.
-                    log.info("macro playback stopped")
-                    return
-                device.write(ecodes.EV_KEY, step.code, 0)
-                device.syn()
-                held = None
+                if value == 1:
+                    held.add(code)
+                    self._pressed_at[code] = at_ms
+                else:
+                    held.discard(code)
+                    self._pressed_at.pop(code, None)
+                previous = max(previous, at_ms)
             log.info("macro finished")
         except OSError:
             log.exception("macro playback failed")
         finally:
-            # A key left down stays down on the real desktop too: every window
-            # that saw it believes a modifier is held. This runs even when the
-            # stop arrived as an exception, which is when it matters most.
-            if held is not None:
+            # Keys left down stay down on the real desktop too: every window
+            # that saw them believes they are still held. This runs even when
+            # the stop arrived as an exception, which is when it matters most,
+            # and it walks every held key because a chord can be holding a
+            # modifier and a letter at once.
+            for code in sorted(held):
                 with contextlib.suppress(Exception):
-                    device.write(ecodes.EV_KEY, held, 0)
+                    device.write(ecodes.EV_KEY, code, 0)
                     device.syn()
-                    log.warning("released key %d that was still held", held)
+                    log.warning("released key %d that was still held", code)
+            self._pressed_at.clear()
+            held.clear()

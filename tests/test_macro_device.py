@@ -19,6 +19,8 @@ from periferia.modules import macrodevice
 
 KEY_A = 30
 KEY_B = 48
+KEY_C = 46
+KEY_LEFTCTRL = 29
 
 
 class FakeDevice:
@@ -72,6 +74,11 @@ def _keys(player: macrodevice.MacroPlayer) -> list[tuple[int, int]]:
     return player.made[0].keys()  # type: ignore[attr-defined]
 
 
+def _declared(player: macrodevice.MacroPlayer) -> set[int]:
+    """Codes the player told the virtual device it might use."""
+    return set(getattr(player, "_codes", set()))
+
+
 def _wait(player: macrodevice.MacroPlayer) -> None:
     if player._thread is not None:
         player._thread.join(timeout=5.0)
@@ -81,7 +88,7 @@ class TestPlaying:
     def test_a_step_is_written_as_a_press_then_a_release(
         self, player: macrodevice.MacroPlayer
     ) -> None:
-        player.play([Step(code=KEY_A, gap_ms=0, hold_ms=40)])
+        player.play([Step(code=KEY_A, at_ms=0, hold_ms=40)])
         _wait(player)
         assert _keys(player) == [(KEY_A, 1), (KEY_A, 0)]
 
@@ -89,7 +96,7 @@ class TestPlaying:
         self, player: macrodevice.MacroPlayer
     ) -> None:
         """After the press, the gap is indistinguishable from a longer hold."""
-        player.play([Step(code=KEY_A, gap_ms=200, hold_ms=40)])
+        player.play([Step(code=KEY_A, at_ms=200, hold_ms=40)])
         _wait(player)
         assert player.slept[0] == pytest.approx(0.2)  # type: ignore[attr-defined]
 
@@ -98,12 +105,73 @@ class TestPlaying:
         self, player: macrodevice.MacroPlayer
     ) -> None:
         """Shorter than the kernel repeat delay, some apps read it as stuck."""
-        player.play([Step(code=KEY_A, gap_ms=0, hold_ms=1)])
+        player.play([Step(code=KEY_A, at_ms=0, hold_ms=1)])
         _wait(player)
         assert player.slept[0] >= macrodevice.MIN_HOLD_S  # type: ignore[attr-defined]
 
     def test_nothing_is_written_for_an_empty_macro(self, player: macrodevice.MacroPlayer) -> None:
         assert player.play([]) is False
+
+
+class TestChords:
+    def test_a_modifier_stays_down_while_the_letter_lands(
+        self, player: macrodevice.MacroPlayer
+    ) -> None:
+        """The bug a step-at-a-time player cannot avoid: ctrl released too early.
+
+        If each key is pressed and released before the next one goes down, the
+        window sees c then a bare ctrl, and Ctrl+C turns into the letter c
+        followed by a stuck modifier.
+        """
+        player.play(
+            [
+                Step(code=KEY_LEFTCTRL, at_ms=0, hold_ms=120),
+                Step(code=KEY_C, at_ms=40, hold_ms=20),
+            ]
+        )
+        _wait(player)
+        assert _keys(player) == [
+            (KEY_LEFTCTRL, 1),
+            (KEY_C, 1),
+            (KEY_C, 0),
+            (KEY_LEFTCTRL, 0),
+        ]
+
+    def test_a_stop_mid_chord_lets_both_keys_back_up(
+        self, player: macrodevice.MacroPlayer
+    ) -> None:
+        """A modifier left down is the worst stuck key there is.
+
+        Every window opened afterwards behaves as if the user is holding ctrl,
+        so both the modifier and the letter have to be released here.
+        """
+        calls = {"n": 0}
+
+        def stop_after_first_sleep(seconds: float) -> None:
+            calls["n"] += 1
+            if calls["n"] == 1:
+                player.stop()
+
+        player._injected_sleep = stop_after_first_sleep
+        player.play(
+            [
+                Step(code=KEY_LEFTCTRL, at_ms=0, hold_ms=2000),
+                Step(code=KEY_C, at_ms=1000, hold_ms=2000),
+            ]
+        )
+        _wait(player)
+        assert not player.playing
+        pressed = {code for code, value in _keys(player) if value == 1}
+        released = {code for code, value in _keys(player) if value == 0}
+        assert pressed == released
+
+    def test_the_player_declares_a_chord_key_before_using_it(
+        self, player: macrodevice.MacroPlayer
+    ) -> None:
+        """A chord can name a key the sequential tests never needed."""
+        player.play([Step(code=KEY_LEFTCTRL, at_ms=0, hold_ms=40)])
+        _wait(player)
+        assert KEY_LEFTCTRL in _declared(player)
 
 
 class TestStopping:
@@ -114,10 +182,12 @@ class TestStopping:
             player.stop()
 
         player._injected_sleep = stop_during_sleep
-        steps = [Step(code=KEY_A, gap_ms=500, hold_ms=40), Step(code=KEY_B, gap_ms=0, hold_ms=40)]
+        steps = [Step(code=KEY_A, at_ms=0, hold_ms=40), Step(code=KEY_B, at_ms=500, hold_ms=40)]
         player.play(steps)
         _wait(player)
-        assert _keys(player) == []
+        # A was already down before the stop arrived, so it comes back up. B is
+        # the one that must not land, which is what the stop was for.
+        assert _keys(player) == [(KEY_A, 1), (KEY_A, 0)]
 
     def test_a_stop_mid_hold_still_lets_the_key_back_up(
         self, player: macrodevice.MacroPlayer
@@ -129,7 +199,7 @@ class TestStopping:
         window that saw it then believes a modifier is held.
         """
         player._injected_sleep = lambda seconds: player.stop()
-        player.play([Step(code=KEY_A, gap_ms=0, hold_ms=2000)])
+        player.play([Step(code=KEY_A, at_ms=0, hold_ms=2000)])
         _wait(player)
         assert _keys(player) == [(KEY_A, 1), (KEY_A, 0)]
 
@@ -154,7 +224,7 @@ class TestStopping:
 
         device.write = flaky  # type: ignore[method-assign]
         player._ensure_device = lambda: device  # type: ignore[method-assign]
-        player.play([Step(code=KEY_A, gap_ms=0, hold_ms=40)])
+        player.play([Step(code=KEY_A, at_ms=0, hold_ms=40)])
         _wait(player)
         # The failing call records nothing, so the press and the cleanup release
         # are the only two events there are to see.
@@ -165,7 +235,7 @@ class TestStopping:
         self, player: macrodevice.MacroPlayer
     ) -> None:
         player._injected_sleep = lambda seconds: player.stop()
-        player.play([Step(code=KEY_A, gap_ms=0, hold_ms=40)])
+        player.play([Step(code=KEY_A, at_ms=0, hold_ms=40)])
         _wait(player)
         assert player.playing is False
 
@@ -181,23 +251,23 @@ class TestNotQueueing:
         """
         release = threading.Event()
         player._injected_sleep = lambda seconds: release.wait(0.01)
-        assert player.play([Step(code=KEY_A, gap_ms=0, hold_ms=40)]) is True
-        assert player.play([Step(code=KEY_B, gap_ms=0, hold_ms=40)]) is False
+        assert player.play([Step(code=KEY_A, at_ms=0, hold_ms=40)]) is True
+        assert player.play([Step(code=KEY_B, at_ms=0, hold_ms=40)]) is False
         release.set()
         _wait(player)
 
     def test_playing_works_again_once_the_first_one_is_done(
         self, player: macrodevice.MacroPlayer
     ) -> None:
-        player.play([Step(code=KEY_A, gap_ms=0, hold_ms=40)])
+        player.play([Step(code=KEY_A, at_ms=0, hold_ms=40)])
         _wait(player)
-        assert player.play([Step(code=KEY_B, gap_ms=0, hold_ms=40)]) is True
+        assert player.play([Step(code=KEY_B, at_ms=0, hold_ms=40)]) is True
         _wait(player)
 
     def test_a_finished_macro_leaves_the_player_usable(
         self, player: macrodevice.MacroPlayer
     ) -> None:
-        player.play([Step(code=KEY_A, gap_ms=0, hold_ms=40)])
+        player.play([Step(code=KEY_A, at_ms=0, hold_ms=40)])
         _wait(player)
         assert player.playing is False
 
@@ -230,8 +300,8 @@ class TestRealTimeInterruption:
         self, real_player: macrodevice.MacroPlayer
     ) -> None:
         steps = [
-            Step(code=KEY_A, gap_ms=5000, hold_ms=40),
-            Step(code=KEY_B, gap_ms=0, hold_ms=40),
+            Step(code=KEY_A, at_ms=0, hold_ms=40),
+            Step(code=KEY_B, at_ms=5000, hold_ms=40),
         ]
         real_player.play(steps)
         time.sleep(0.05)  # let the thread get into the wait
@@ -247,23 +317,23 @@ class TestRealTimeInterruption:
         self, real_player: macrodevice.MacroPlayer
     ) -> None:
         steps = [
-            Step(code=KEY_A, gap_ms=5000, hold_ms=40),
-            Step(code=KEY_B, gap_ms=0, hold_ms=40),
+            Step(code=KEY_A, at_ms=0, hold_ms=40),
+            Step(code=KEY_B, at_ms=5000, hold_ms=40),
         ]
         real_player.play(steps)
-        time.sleep(0.05)
+        time.sleep(0.05)  # A has come and gone, the five second wait is under way
         real_player.stop()
         self._settle(real_player)
         device: FakeDevice = real_player.made[0]  # type: ignore[attr-defined]
         real_player.close()
-        assert device.keys() == []
+        assert device.keys() == [(KEY_A, 1), (KEY_A, 0)]
 
     def test_a_key_held_at_the_moment_of_a_stop_is_released(
         self, real_player: macrodevice.MacroPlayer
     ) -> None:
         """Otherwise stopping leaves the key down in every window opened after,
         which is the kind of thing that eats a document."""
-        real_player.play([Step(code=KEY_A, gap_ms=0, hold_ms=400)])
+        real_player.play([Step(code=KEY_A, at_ms=0, hold_ms=400)])
         time.sleep(0.08)  # pressed, and still inside the hold
         real_player.stop()
         self._settle(real_player)
@@ -276,7 +346,7 @@ class TestRealTimeInterruption:
     def test_a_short_macro_still_finishes_on_its_own(
         self, real_player: macrodevice.MacroPlayer
     ) -> None:
-        real_player.play([Step(code=KEY_A, gap_ms=0, hold_ms=20)])
+        real_player.play([Step(code=KEY_A, at_ms=0, hold_ms=20)])
         self._settle(real_player)
         device: FakeDevice = real_player.made[0]  # type: ignore[attr-defined]
         real_player.close()

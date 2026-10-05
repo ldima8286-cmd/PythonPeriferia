@@ -23,6 +23,7 @@ from typing import Any
 
 MAX_GAP_MS = 5_000
 MAX_HOLD_MS = 2_000
+MAX_AT_MS = 60_000
 DEFAULT_HOLD_MS = 40
 
 
@@ -32,11 +33,23 @@ class MacroError(Exception):
 
 @dataclasses.dataclass(frozen=True, slots=True)
 class Step:
-    """One keypress, timed. Codes are resolved to numbers only at the edge."""
+    """One keypress, timed. Codes are resolved to numbers only at the edge.
+
+    `at_ms` is an offset from the start of the macro rather than a pause before
+    the step, because a pause before the step cannot describe two keys that are
+    down at once. Ctrl+C is one key going down at 0 ms and another at 40 ms, and
+    no sequence of "wait N ms, then press this" pairs can say that. An offset
+    from the start says it directly, and a purely sequential recording is just
+    the case where no two keys overlap.
+    """
 
     code: int
-    gap_ms: int
+    at_ms: int
     hold_ms: int
+
+    @property
+    def ends_at_ms(self) -> int:
+        return self.at_ms + self.hold_ms
 
 
 def clamp_gap(ms: int) -> int:
@@ -45,6 +58,10 @@ def clamp_gap(ms: int) -> int:
 
 def clamp_hold(ms: int) -> int:
     return max(1, min(int(ms), MAX_HOLD_MS))
+
+
+def clamp_at(ms: int) -> int:
+    return max(0, min(int(ms), MAX_AT_MS))
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
@@ -59,7 +76,7 @@ class Macro:
     @property
     def duration_ms(self) -> int:
         """How long a full playback takes, used to answer 'is this sane'."""
-        return sum(step.gap_ms + step.hold_ms for step in self.steps)
+        return max((step.ends_at_ms for step in self.steps), default=0)
 
     def playable(self) -> str | None:
         """Why this macro cannot be played, or None when it can."""
@@ -77,20 +94,37 @@ def from_config(entry: Any, resolve: Any) -> Macro:
     `resolve` maps a name like KEY_F5 to its code, and returns None for a name it
     does not know. Unknown names are an error here rather than skipped, because
     a silently dropped step produces a macro that types the wrong thing.
+
+    Two spellings of timing are accepted. `at_ms` is an offset from the start of
+    the macro and is what gets written now. `gap_ms` is the older way, a pause
+    from the previous key coming back up, and is converted to an offset so that
+    configs recorded before chords existed keep playing the way they did. When a
+    step carries both, `at_ms` wins: a file that says both means to be explicit.
     """
     steps: list[Step] = []
+    cursor = 0
     for raw in getattr(entry, "steps", None) or []:
         name = getattr(raw, "key", "")
         code = resolve(name)
         if code is None:
             raise MacroError(f"'{name}' is not a key this project knows")
-        steps.append(
-            Step(
-                code=code,
-                gap_ms=clamp_gap(getattr(raw, "gap_ms", 0)),
-                hold_ms=clamp_hold(getattr(raw, "hold_ms", DEFAULT_HOLD_MS)),
-            )
-        )
+
+        explicit = getattr(raw, "at_ms", None)
+        if explicit is None:
+            # gap_ms is a pause from the previous release, so it lands after the
+            # end of the previous step rather than at the cursor itself.
+            at_ms = cursor + clamp_gap(getattr(raw, "gap_ms", 0))
+        else:
+            at_ms = clamp_at(explicit)
+
+        hold_ms = clamp_hold(getattr(raw, "hold_ms", DEFAULT_HOLD_MS))
+        steps.append(Step(code=code, at_ms=at_ms, hold_ms=hold_ms))
+        # The cursor tracks where the previous key came back up, so an explicit
+        # offset partway through a file does not drag later legacy steps behind
+        # the point the file has actually reached.
+        cursor = max(cursor, at_ms + hold_ms)
+
+    steps.sort(key=lambda step: step.at_ms)
     return Macro(
         name=getattr(entry, "name", "") or "",
         steps=tuple(steps),
@@ -156,11 +190,39 @@ def playback_steps(
     Dropped, not reordered: a macro bound to F5 that recorded F5 would otherwise
     fire itself on every pass. Reserved codes are dropped for the same reason a
     remap refuses to touch them.
+
+    Offsets are left alone when a step is dropped. The remaining keys keep the
+    timing the recording gave them rather than sliding earlier to fill the hole,
+    because a pause a person deliberately took should survive having one key
+    removed from the middle of it.
     """
     banned = set(reserved)
     if trigger_code is not None:
         banned.add(trigger_code)
     return tuple(step for step in macro.steps if step.code not in banned)
+
+
+def timeline(steps: Iterable[Step]) -> tuple[tuple[int, int, int], ...]:
+    """Flatten steps into the ordered press/release events playback sends.
+
+    A press at 0 ms and a press at 40 ms used to be "press A, release A, wait,
+    press B, release B", which is the one shape that cannot hold two keys at
+    once. Here each step contributes two events at its own offsets, so the
+    events interleave and Ctrl+C is Ctrl down, C down, C up, Ctrl up.
+
+    Two orderings matter. When a release and a press land on the same
+    millisecond the release goes first, so a key is never momentarily down
+    twice. When two presses land together they keep the order they were
+    recorded in, which is what puts a modifier down before the letter it
+    modifies.
+    """
+    events: list[tuple[int, int, int, int, int]] = []
+    for order, step in enumerate(steps):
+        events.append((step.at_ms, 1, order, step.code, 1))
+        events.append((step.ends_at_ms, 0, order, step.code, 0))
+
+    events.sort(key=lambda item: (item[0], item[1], item[2]))
+    return tuple((at_ms, code, value) for at_ms, _phase, _order, code, value in events)
 
 
 def plan(
@@ -205,50 +267,63 @@ class Recorder:
     Fed (monotonic seconds, code, value) triples and knows nothing about
     evdev, so the rules that matter can be tested without a keyboard.
 
-    Two of those rules are not obvious:
+    Three of those rules are not obvious:
 
     - Auto-repeat is dropped. A held key reports value 2 over and over, and
       recording those would turn one long press into a burst of dozens.
     - The key that started the recording is never recorded, because it is the
       key that has to stop it. Recording it makes the stop key part of the
       macro, and the macro then types its own trigger on replay.
+    - Every key held at once is kept, not just the last one. A recorder with a
+      single slot cannot represent Ctrl+C at all: the press of C overwrites the
+      pending press of Ctrl, and what comes out is two taps instead of a chord.
     """
 
     ignore: frozenset[int] = frozenset()
     steps: list[Step] = dataclasses.field(default_factory=list)
-    _pending: int | None = None
-    _pending_gap: int = 0
-    _pressed_at: float = 0.0
-    _released_at: float | None = None
+    _pressed: dict[int, float] = dataclasses.field(default_factory=dict)
+    _started_at: float | None = None
+    _last_end_ms: int = 0
 
     def feed(self, at: float, code: int, value: int) -> None:
         if code in self.ignore:
             return
         if value == 2:  # auto-repeat, not a new press
             return
+
+        if self._started_at is None:
+            self._started_at = at
+
         if value == 1:
-            gap = 0 if self._released_at is None else round((at - self._released_at) * 1000)
-            self._pending = code
-            self._pending_gap = clamp_gap(gap)
-            self._pressed_at = at
+            self._pressed[code] = at
             return
         if value != 0:
             return
-        if self._pending != code:
+        if code not in self._pressed:
             return  # a release with no press: a key that was already down
-        held = round((at - self._pressed_at) * 1000)
-        self.steps.append(Step(code=code, gap_ms=self._pending_gap, hold_ms=clamp_hold(held)))
-        self._pending = None
-        self._released_at = at
+
+        press_at = self._pressed.pop(code)
+        assert self._started_at is not None
+        at_ms = round((press_at - self._started_at) * 1000)
+        # A recording that sat idle for an hour must not replay as an hour of
+        # waiting, so a long silence between presses is cut back to MAX_GAP_MS.
+        # Overlapping presses are earlier than the previous release and are left
+        # alone: that gap is a chord, not a pause.
+        at_ms = min(at_ms, self._last_end_ms + MAX_GAP_MS)
+        hold_ms = clamp_hold(round((at - press_at) * 1000))
+
+        self.steps.append(Step(code=code, at_ms=clamp_at(at_ms), hold_ms=hold_ms))
+        self._last_end_ms = max(self._last_end_ms, at_ms + hold_ms)
 
     def finish(self) -> tuple[Step, ...]:
         """End the recording, returning what was captured.
 
-        A key still held when recording stops is dropped rather than given a
-        zero-length hold, because the release never came and there is no honest
-        duration to record for it.
+        Keys still held when recording stops are dropped rather than given a
+        zero-length hold, because their release never came and there is no
+        honest duration to record for them.
         """
-        self._pending = None
+        self._pressed.clear()
+        self.steps.sort(key=lambda step: step.at_ms)
         return tuple(self.steps)
 
 

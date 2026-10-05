@@ -9,16 +9,17 @@ import sys
 import threading
 import time
 from collections import deque
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from functools import partial
 from pathlib import Path
 from types import FrameType
 
+from ..core import keyboards as keyboards_mod
 from ..core import pipewire as pipewire_mod
 from ..modules.audio import VirtualMic
 from ..modules.hotkey import (
     HotkeyListener,
-    find_keyboards,
+    find_keyboards_detailed,
     is_button_code,
     resolve_key,
 )
@@ -29,9 +30,28 @@ from ..modules.router import KeyboardRouter
 from . import config as config_mod
 from . import logging_setup
 from . import state as state_mod
+from . import watcher as watcher_mod
 from .macro import Macro, bindings, effective
 
 log = logging.getLogger(__name__)
+
+
+def _remapping(listener: HotkeyListener | KeyboardRouter) -> bool:
+    """Whether a listener applies a keyboard profile rather than just reading keys.
+
+    Asked as a property rather than isinstance() because the plain listener is
+    the fallback, and what the daemon needs to know is what a listener will do,
+    not which class it happens to be.
+    """
+    return bool(getattr(listener, "remapping", False))
+
+
+def _listener_table(listener: HotkeyListener | KeyboardRouter) -> dict[int, int] | None:
+    """The remap table a listener is actually applying, or None if it is not one."""
+    if not _remapping(listener):
+        return None
+    return dict(getattr(listener, "table", {}))
+
 
 class Daemon:
     def __init__(self, cfg: config_mod.Config) -> None:
@@ -51,6 +71,23 @@ class Daemon:
         self._stop = threading.Event()
         self._listener: HotkeyListener | KeyboardRouter | None = None
         self.macros = MacroPlayer()
+        # Keyboards seen before, so a rescan can tell a newly plugged one from
+        # one already being watched, and so the same keyboard stays first.
+        self._known = keyboards_mod.KnownKeyboards()
+        self._watched: set[Path] = set()
+        # Whether the PTT key is a mouse button, which decides if mice are worth
+        # looking for. Cached from the resolved code rather than re-resolved on
+        # every rescan.
+        self._include_pointers = False
+        # The remap table currently in force, so a config reload can tell an
+        # actual profile change from a save that only touched a macro.
+        self._loaded_table: dict[int, int] | None = None
+        # Whether the listener currently holds the devices open. A config reload
+        # rebuilds the listener and has to know whether it must reopen it.
+        self._listener_open = False
+        # Watches the config file, so a finished macro recording goes live
+        # without restarting the daemon.
+        self._config_watcher: watcher_mod.ConfigWatcher | None = None
         # Bound macros, resolved once at start. A macro whose key name is not a
         # real key is left out here and reported by 'periferia macro check'
         # instead of taking the daemon down on the next keypress.
@@ -106,6 +143,145 @@ class Daemon:
         if self._macro_codes:
             log.info("%d macro(s) bound to keys", len(self._macro_codes))
         return len(self._macro_codes)
+
+    def reload_config(self) -> bool:
+        """Re-read the config and apply it to macros and to the keyboard profile.
+
+        What is deliberately not reloaded: the microphone, the virtual source and
+        the audio processing. Those own a PipeWire node that applications are
+        pointed at, and rebuilding it drops every stream pointed at it. A macro
+        or a profile change needs none of that, so a reload here can never take
+        the microphone away from a game that is already using it.
+
+        A broken config is the important case. The recording left the file is the
+        usual reason, so the old macros and the old profile stay loaded and the
+        reason is logged; the alternative, dropping everything, would silence the
+        microphone on a typo in one key name.
+        """
+        path = self.cfg.path
+        if path is None:
+            log.debug("no config path, cannot reload")
+            return False
+
+        try:
+            fresh = config_mod.load(path)
+        except Exception as exc:
+            log.error("config is not readable, keeping what is loaded: %s", exc)
+            return False
+
+        self.cfg = fresh
+        self.load_macros()
+
+        old_table = self._loaded_table
+        try:
+            table = active_remap(fresh.profiles)
+        except RemapError as exc:
+            log.error("ignoring the keyboard profile: %s", exc)
+            table = None
+
+        if table == old_table:
+            log.info("macros reloaded, the keyboard profile did not change")
+            return True
+
+        # Only the keyboard is rebuilt, and only when the remap table actually
+        # changed. Saving a macro must not cost the user their keyboard for a
+        # second, and the profile is the expensive part.
+        applied = self._swap_profile(table)
+        if not applied:
+            log.warning("cannot apply the new keyboard profile, keeping the old one")
+            self._swap_profile(old_table)
+            return False
+
+        if self._loaded_table is None and table is not None:
+            log.warning("the new keyboard profile did not take, running without it")
+        return True
+
+    def _swap_profile(self, table: dict[int, int] | None) -> bool:
+        """Rebuild the listener for a different remap table. False if it would not start.
+
+        The old listener is kept until the new one is actually open. A reload that
+        left no way to read the keyboard would take push-to-talk with it, and a
+        config the user just typed is the least trustworthy thing to bet the
+        microphone on.
+        """
+        if table is None:
+            return False
+
+        current = self._listener
+        assert current is not None
+        devices = list(current.devices)
+        code = current.ptt_code
+        panic = current.panic_code
+        was_open = self._listener_open
+
+        replacement = self._make_router(devices, code, panic, table)
+        if was_open:
+            self._close_listener()
+            try:
+                replacement.open()
+            except Exception as exc:
+                log.error("cannot remap the keyboard, continuing without it: %s", exc)
+                plain = self._make_plain(devices, code, panic)
+                self._listener = plain
+                plain.open()
+                self._loaded_table = None
+                return True
+            if _remapping(replacement):
+                log.info("keyboard profile is active")
+            else:
+                log.info("keyboard profile is no longer active")
+
+        self._listener = replacement
+        self._loaded_table = _listener_table(replacement)
+        return True
+
+    def _open_listener(self) -> None:
+        """Open the current listener, falling back to plain listening if needed.
+
+        A profile that cannot be applied is not worth the microphone. If the grab
+        or the virtual device fails, push-to-talk carries on unmodified and the
+        reason is logged, rather than the daemon refusing to start.
+        """
+        listener = self._listener
+        assert listener is not None
+
+        if _remapping(listener):
+            try:
+                listener.open()
+            except Exception as exc:
+                log.error("cannot remap the keyboard, continuing without it: %s", exc)
+                listener = self._make_plain(
+                    list(listener.devices), listener.ptt_code, listener.panic_code
+                )
+                self._listener = listener
+                listener.open()
+                self._loaded_table = None
+                self._listener_open = True
+                return
+            self._loaded_table = _listener_table(listener)
+            log.info("keyboard profile is active")
+
+        listener.open()
+        self._listener_open = True
+
+    def _close_listener(self) -> None:
+        listener = self._listener
+        if listener is None:
+            return
+        listener.close()
+        self._listener_open = False
+
+    def _reload_from_watcher(self) -> None:
+        """Apply a changed config, then reset the watcher.
+
+        The reload replaces the listener object, and the loop polls whichever one
+        is current, so a reload that swapped it is followed immediately by the new
+        one. forget() keeps the change from being seen twice, which for a profile
+        change would mean rebuilding the keyboard for nothing.
+        """
+        self.reload_config()
+        if self._config_watcher is not None:
+            self._config_watcher.forget()
 
     def _macro_triggers(self) -> dict[int, Callable[[], None]]:
         return {
@@ -239,9 +415,7 @@ class Daemon:
 
         # a mouse only gets watched when the PTT key is one of its buttons,
         # since reading one needs an extra udev rule nobody asked for
-        devices = find_keyboards(
-            self.cfg.ptt.device, include_pointers=is_button_code(code)
-        )
+        devices = self._ordered_devices(is_button_code(code))
         if not devices:
             log.error("no keyboard device found")
             log.error("run 'periferia check' to see what is visible and unreadable")
@@ -254,57 +428,119 @@ class Daemon:
         except RemapError as exc:
             log.error("ignoring the keyboard profile: %s", exc)
             table = None
-        if table:
-            self._listener = self._make_router(devices, code, panic, table)
-        else:
-            self._listener = HotkeyListener(
-                devices,
-                code,
-                panic_code=panic,
-                ignore_repeat=self.cfg.ptt.ignore_repeat,
-                on_press=self.on_press,
-                on_release=self.on_release,
-                on_panic=self.on_panic,
-                macro_codes=self._macro_triggers(),
-            )
+        self._remember_watched(devices)
+        self._listener = self._make_router(devices, code, panic, table or {})
+        # Only claimed as loaded once the listener is actually open, which is
+        # _open_listener's job; it clears this again if remapping turns out to be
+        # impossible.
+        self._loaded_table = None
         return True
+
+    def _ordered_devices(self, include_pointers: bool) -> list[Path]:
+        """The keyboards to watch, ones used recently first.
+
+        Discovery hands them over in filesystem order, which moves around when
+        hardware is plugged in. Sorting by when a keyboard was last seen keeps
+        the same one first between runs, and every one that shows up counts as
+        used so it moves to the front.
+        """
+        self._include_pointers = include_pointers
+        found = find_keyboards_detailed(
+            self.cfg.ptt.device, include_pointers=include_pointers
+        )
+        self._known = keyboards_mod.KnownKeyboards()
+        present = {path for path, _name, _phys, _by_id in found}
+        # A keyboard that is gone has to stop being remembered as watched. Event
+        # node numbers are handed out in enumeration order, so the next keyboard
+        # plugged in can land on the number a departed one had, and would then be
+        # taken for one already open and never read at all.
+        self._watched &= present
+
+        by_id: dict[str, Path] = {}
+        for path, _name, phys, link in found:
+            by_id[keyboards_mod.identity(path, phys=phys, by_id=link)] = path
+        devices = [by_id[i] for i in self._known.order(list(by_id)) if i in by_id]
+        for path, _name, phys, link in found:
+            self._known.seen(
+                keyboards_mod.identity(path, phys=phys, by_id=link), node=path
+            )
+        self._known.flush()
+        return devices
+
+    def _new_devices(self) -> list[Path]:
+        """Keyboards that showed up since startup, in remembered priority order.
+
+        Rate limited inside KnownKeyboards, because looking means opening every
+        candidate device and the main loop calls this on every idle pass.
+        """
+        if not self._known.rescan_due():
+            return []
+        found = find_keyboards_detailed(
+            self.cfg.ptt.device, include_pointers=self._include_pointers
+        )
+        self._watched &= {path for path, _n, _p, _b in found}
+
+        fresh: dict[str, Path] = {}
+        watched = self._listener_devices()
+        for path, name, phys, link in found:
+            if path in watched:
+                continue
+            ident = keyboards_mod.identity(path, phys=phys, by_id=link)
+            self._known.touch(ident, name=name)
+            fresh[ident] = path
+        ranked = self._known.order(list(fresh))
+        out = [fresh[i] for i in ranked if i in fresh]
+        if out:
+            self._watched.update(out)
+            self._known.flush()
+        return out
+
+    def _listener_devices(self) -> set[Path]:
+        """Paths already being watched, so a rescan can tell new from old."""
+        return set(self._watched)
+
+    def _remember_watched(self, paths: Iterable[Path]) -> None:
+        self._watched.update(paths)
 
     def _make_router(
         self, devices: list[Path], code: int, panic: int | None, table: dict[int, int]
     ) -> HotkeyListener | KeyboardRouter:
-        """Build a router, or fall back to plain listening if it cannot start.
+        """Build the listener for a remap table. Opening it is the caller's job.
 
-        A profile that cannot be applied is not worth the microphone. If the
-        grab or the virtual device fails, push-to-talk carries on unmodified and
-        the reason is logged, rather than the daemon refusing to start.
+        Nothing here touches the devices. open() grabs them and creates the
+        virtual keyboard, and doing that inside a builder made it impossible for
+        the caller to tell a constructed listener from an open one, which is
+        exactly the distinction a config reload needs.
         """
-        try:
-            router = KeyboardRouter(
-                devices,
-                code,
-                panic_code=panic,
-                ignore_repeat=self.cfg.ptt.ignore_repeat,
-                table=table,
-                on_press=self.on_press,
-                on_release=self.on_release,
-                on_panic=self.on_panic,
-                macro_codes=self._macro_triggers(),
-            )
-            router.open()
-        except Exception as exc:
-            log.error("cannot remap the keyboard, continuing without it: %s", exc)
-            return HotkeyListener(
-                devices,
-                code,
-                panic_code=panic,
-                ignore_repeat=self.cfg.ptt.ignore_repeat,
-                on_press=self.on_press,
-                on_release=self.on_release,
-                on_panic=self.on_panic,
-                macro_codes=self._macro_triggers(),
-            )
-        log.info("keyboard profile is active")
-        return router
+        if not table:
+            return self._make_plain(devices, code, panic)
+        return KeyboardRouter(
+            devices,
+            code,
+            panic_code=panic,
+            ignore_repeat=self.cfg.ptt.ignore_repeat,
+            table=table,
+            on_press=self.on_press,
+            on_release=self.on_release,
+            on_panic=self.on_panic,
+            macro_codes=self._macro_triggers(),
+            rescan=self._new_devices,
+        )
+
+    def _make_plain(
+        self, devices: list[Path], code: int, panic: int | None
+    ) -> HotkeyListener:
+        return HotkeyListener(
+            devices,
+            code,
+            panic_code=panic,
+            ignore_repeat=self.cfg.ptt.ignore_repeat,
+            on_press=self.on_press,
+            on_release=self.on_release,
+            on_panic=self.on_panic,
+            macro_codes=self._macro_triggers(),
+            rescan=self._new_devices,
+        )
 
     def on_press(self) -> None:
         if self._latched:
@@ -420,15 +656,17 @@ class Daemon:
         if not self.setup():
             return 1
         self.load_macros()
+        self._config_watcher = watcher_mod.config_watcher(
+            self.cfg.path, self._reload_from_watcher
+        )
+        if self._config_watcher is not None:
+            log.info("watching %s for changes", self.cfg.path)
 
-        listener = self._listener
-        assert listener is not None
-        opened = False
+        self._listener_open = False
 
         try:
             try:
-                listener.open()
-                opened = True
+                self._open_listener()
             except (OSError, RuntimeError) as exc:
                 log.error("cannot open the input device: %s", exc)
                 log.error("this usually means missing permissions, see docs/udev.md")
@@ -439,9 +677,15 @@ class Daemon:
             )
 
             while not self._stop.is_set():
+                # Re-read every pass rather than caching it: a config reload
+                # replaces the listener object outright.
+                listener = self._listener
+                assert listener is not None
                 listener.poll(timeout=0.2)
                 self._expire_hold()
                 self._expire_stuck_hold()
+                if self._config_watcher is not None:
+                    self._config_watcher.check()
         except KeyboardInterrupt:
             pass
         except OSError as exc:
@@ -451,8 +695,8 @@ class Daemon:
             # every exit has to go through here. Returning early on a failed
             # device open used to leave the echo cancel module loaded, and the
             # next run then collided with it on the source name
-            if opened:
-                listener.close()
+            if self._listener_open:
+                self._close_listener()
             # Releases any key a macro was holding and closes the virtual
             # device. A macro interrupted by shutdown would otherwise leave a
             # key down for the rest of the session, and nothing in the log

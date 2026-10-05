@@ -338,6 +338,12 @@ def save_macro(
 ) -> None:
     """Write one macro back into the config, touching nothing else.
 
+    `steps` is (key, at_ms, hold_ms). The offset is counted from the start of the
+    macro rather than from the previous release, so a chord survives the round
+    trip: two keys whose offsets overlap stay overlapping in the file instead of
+    being flattened into consecutive taps by the writer."""
+    """Write one macro back into the config, touching nothing else.
+
     Round-trip YAML for the same reason save_profiles uses it: rewriting the
     file from the schema would delete every section this function does not know
     about, and the config has several. Comments in particular would survive
@@ -373,7 +379,7 @@ def save_macro(
         "name": name,
         "bind": bind,
         "steps": [
-            {"key": key, "gap_ms": int(gap), "hold_ms": int(hold)} for key, gap, hold in steps
+            {"key": key, "at_ms": int(at), "hold_ms": int(hold)} for key, at, hold in steps
         ],
     }
 

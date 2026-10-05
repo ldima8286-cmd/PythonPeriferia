@@ -36,13 +36,13 @@ class TestSavingAGlobalMacro:
         assert cfg.macros[0].name == "hello"
         assert cfg.macros[0].bind == "KEY_F5"
         assert [s.key for s in cfg.macros[0].steps] == ["KEY_H", "KEY_I"]
-        assert [s.gap_ms for s in cfg.macros[0].steps] == [120, 60]
+        assert [s.at_ms for s in cfg.macros[0].steps] == [120, 60]
 
     def test_the_timings_survive_exactly(self, tmp_path: Path) -> None:
         path = tmp_path / "config.yaml"
         path.write_text(_config(), encoding="utf-8")
         model.save_macro(path, "m", [("KEY_A", 7, 3)], bind="")
-        assert load(path).macros[0].steps[0].gap_ms == 7
+        assert load(path).macros[0].steps[0].at_ms == 7
         assert load(path).macros[0].steps[0].hold_ms == 3
 
     def test_recording_over_a_macro_of_the_same_name_replaces_it(self, tmp_path: Path) -> None:

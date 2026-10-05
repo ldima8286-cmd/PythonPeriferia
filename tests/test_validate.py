@@ -243,7 +243,7 @@ class TestCheckMacros:
             name=name,
             bind=bind,
             steps=[
-                config_mod.MacroStep(key=k, gap_ms=kw.get("gap", 0), hold_ms=kw.get("hold", 40))
+                config_mod.MacroStep(key=k, at_ms=kw.get("gap", 0), hold_ms=kw.get("hold", 40))
                 for k in keys
             ],
             **({"enabled": kw["enabled"]} if "enabled" in kw else {}),

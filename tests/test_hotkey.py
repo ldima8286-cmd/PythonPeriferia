@@ -532,3 +532,90 @@ def test_device_group_falls_back_to_the_name_without_phys() -> None:
         "usb-Vendor_Kbd"
     )
     assert hotkey.device_group(dev, "event4", Path("/dev/input/event4")) == "event4"
+
+
+def test_a_keyboard_plugged_in_while_running_starts_working(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # the laptop keyboard asleep at boot, a USB one plugged in mid game: its PTT
+    # key used to do nothing at all until the daemon was restarted
+    first, arrived = _FakeDev(), _FakeDev()
+    monkeypatch.setattr(
+        hotkey, "open_device", lambda path: (first if "event4" in str(path) else arrived)
+    )
+    later = [Path("/dev/input/event9")]
+
+    listener = hotkey.HotkeyListener(
+        [Path("/dev/input/event4")], 30, rescan=lambda: list(later)
+    )
+    listener.open()
+    got: list[str] = []
+    listener.on_press = lambda: got.append("press")
+    listener.on_release = lambda: got.append("release")
+
+    listener.poll(timeout=0.05)
+
+    assert Path("/dev/input/event9") in listener._devs
+    # the new keyboard now reports PTT, so it is a real press and not just a
+    # node that exists
+    arrived.queued = [_FakeEvent(hotkey.ecodes.EV_KEY, 30, hotkey.PRESS)]
+    os.write(arrived.write_fd, b"x")
+    listener.poll(timeout=1.0)
+    assert got == ["press"]
+
+
+def test_a_keyboard_that_cannot_be_opened_leaves_the_others_alone(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # one broken arrival must not cost the PTT key on the keyboard that works
+    first = _FakeDev()
+
+    def open_it(path: object) -> object:
+        if "event9" in str(path):
+            raise OSError("no permission")
+        return first
+
+    monkeypatch.setattr(hotkey, "open_device", open_it)
+    listener = hotkey.HotkeyListener(
+        [Path("/dev/input/event4")], 30, rescan=lambda: [Path("/dev/input/event9")]
+    )
+    listener.open()
+    listener.poll(timeout=0.05)
+
+    assert Path("/dev/input/event4") in listener._devs
+    assert Path("/dev/input/event9") not in listener._devs
+
+
+def test_a_keyboard_already_watched_is_not_opened_twice(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    first = _FakeDev()
+    monkeypatch.setattr(hotkey, "open_device", lambda path: first)
+    listener = hotkey.HotkeyListener(
+        [Path("/dev/input/event4")], 30, rescan=lambda: [Path("/dev/input/event4")]
+    )
+    listener.open()
+    listener.poll(timeout=0.05)
+
+    assert listener.add_devices([Path("/dev/input/event4")]) == 0
+
+
+def test_a_rescan_that_raises_does_not_stop_the_listener() -> None:
+    # housekeeping must never be able to take the microphone down
+
+    def boom() -> list[Path]:
+        raise RuntimeError("evdev fell over")
+
+    listener = hotkey.HotkeyListener([Path("/dev/input/event4")], 30, rescan=boom)
+    dev = _FakeDev()
+    listener._devs = {Path("/dev/input/event4"): dev}
+    listener.poll(timeout=0.05)
+
+    assert Path("/dev/input/event4") in listener._devs
+
+
+def test_no_rescan_is_attempted_when_none_was_asked_for() -> None:
+    # pick-key waits for one keypress; it has no business hunting for keyboards
+    listener = _listener(_FakeDev())
+    assert listener._rescan is None
+    listener.poll(timeout=0.02)

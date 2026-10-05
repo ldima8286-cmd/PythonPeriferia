@@ -18,10 +18,20 @@ than any one application.
 - `processing` — turns on PipeWire's own RNNoise noise suppression, echo
   cancellation and voice detection. These are module properties, not DSP
   written here.
+- `macros` — records keypresses with their timing and replays them from one key,
+  globally or overridden per window. Chords are recorded as they were typed, with
+  several keys held at once. Purely a keyboard feature; the microphone is not
+  involved.
 - `cli` — environment check, device listing, key picker, manual volume ramp,
   and a `status` that reports whether the microphone is open.
+- `gui` — a window with four pages: state, profiles, keys, checks.
 
-Not built yet: tray icon, input profiles, RGB, GUI. See "Roadmap".
+The daemon watches the config file, so a finished macro recording or an edited
+keyboard profile is picked up within about a second. See "Macros".
+
+  Not built yet: tray icon, RGB. The input profiles are configurable and
+  validated, but nothing follows the focused window yet, so a profile only
+  takes effect as the first enabled one. See "Roadmap".
 
 ### Knowing whether the microphone is open
 
@@ -199,6 +209,11 @@ reads the keyboard, it never grabs it, so your typing keeps working normally.
 | `periferia status` | say whether the microphone is live right now |
 | `periferia config` | show the config actually in effect |
 | `periferia install-service` | install the systemd user unit |
+| `periferia macro list` | every macro, what plays it, and what is in it |
+| `periferia macro check` | what will not work, and why |
+| `periferia macro play NAME` | play one macro once, without binding it |
+| `periferia macro record NAME` | record a macro; `--bind`, `--stop-key`, `--in-profile` |
+| `periferia macro delete NAME` | remove a macro |
 
 ## Configuration
 
@@ -257,9 +272,40 @@ macros
 | `periferia macro record NAME` | record; `--bind KEY_F5`, `--stop-key KEY_F12`, `--in-profile game` |
 | `periferia macro delete NAME` | remove it |
 
-Recording captures how long each key was held and how long the pause before it
-was, so the playback types at the speed you typed rather than as fast as the
-program can.
+Recording captures how long each key was held and when it went down, so the
+playback types at the speed you typed rather than as fast as the program can.
+
+Several keys at once are recorded as they were, so a chord stays a chord:
+
+```yaml
+macros:
+  - name: ctrl-c
+    bind: KEY_F7
+    steps:
+      - key: KEY_LEFTCTRL
+        at_ms: 0        # goes down first
+        hold_ms: 40
+      - key: KEY_C
+        at_ms: 40       # while the modifier is still held
+        hold_ms: 20
+      - key: KEY_C
+        at_ms: 60       # and comes back up before the modifier
+        hold_ms: 20
+      - key: KEY_LEFTCTRL
+        at_ms: 80
+        hold_ms: 40
+```
+
+`at_ms` is counted from the start of the macro, not from the previous key, which
+is what lets two keys overlap. A step with a negative or missing `at_ms` plays
+one after the one before it, so a plain list of single keys still works.
+
+`gap_ms` is the older spelling: a pause measured from when the previous key came
+up. It is still read, so macros recorded before chords existed keep playing as
+they did, but it cannot express a chord and nothing new writes it.
+
+If the program is stopped in the middle of a macro, every key it was holding is
+released. Otherwise Ctrl would stay down for the rest of the session.
 
 Two rules worth knowing:
 
@@ -276,7 +322,7 @@ macros:
     bind: KEY_F5
     steps:
       - key: KEY_H
-        gap_ms: 120
+        at_ms: 0
         hold_ms: 40
 profiles:
   - name: game
@@ -286,7 +332,7 @@ profiles:
         bind: KEY_F6
         steps:
           - key: KEY_GRAVE
-            gap_ms: 30
+            at_ms: 0
             hold_ms: 40
 ```
 
@@ -296,6 +342,21 @@ name does not match anything, the macro is saved globally instead and says so.
 Preserving the same name across both places is deliberate. It means the profile
 is an override of one macro rather than a second macro that happens to look
 similar, and `macro check` can tell you which window a key will do what in.
+
+### Saving and reloading
+
+`periferia macro record` writes the config file while the daemon is running, and
+the daemon notices within about a second. A recording is playable as soon as it
+says `saved`; there is nothing to restart.
+
+The same is true of the keyboard profile. Edit `profiles:` and save, and the
+keyboard is picked up again a second later.
+
+Neither reloads the microphone, the virtual source or the audio processing. Those
+own a PipeWire node that your applications are pointed at, and rebuilding it would
+drop every stream pointed at it. If the new config cannot be read, the daemon
+says so and keeps running on the one it already had — a typo in one key name does
+not cost you the microphone.
 
 ## Safety
 
@@ -337,6 +398,31 @@ ptt:
 
 `periferia pick-key` listens on all keyboards as well, so the key can be
 pressed on whichever one you like.
+
+### Plugged in while it is running
+
+A keyboard connected after startup is picked up on its own, within about a second
+of settling down. There is nothing to restart, and the daemon looks again only
+when the keyboard has been idle, so it costs nothing while you are typing.
+
+### Which keyboard comes first
+
+Every usable keyboard is watched no matter which one was used last. Priority is
+only about the order they are opened and listed in, which matters because
+`/dev/input/event4` is not the same node after a reboot.
+
+To remember that order, the daemon writes `${XDG_RUNTIME_DIR}/periferia/keyboards.json`
+after each scan. It is a cache, not configuration: deleting it costs nothing but
+the remembered order, and it goes away with the session.
+
+A keyboard is recognized by its physical path (`phys`, what the kernel reports for
+where it is plugged in) and, for anything the kernel does not give a path to,
+by its `/dev/input/by-id` name. Both survive a reboot, which an event node does
+not. A keyboard that has neither is remembered by node number, which is the one
+case that cannot be fixed from here.
+
+A keyboard that is unplugged stops being remembered, so the next one to arrive is
+not mistaken for it.
 
 A mouse button works as the PTT key too, e.g. `BTN_SIDE` for a side button on a
 gaming mouse. A mouse is only watched when the configured key is one of its
@@ -431,8 +517,9 @@ reports on this.
 - [ ] tray icon and overlay indicator, reading the state file `periferia status` uses
 - [ ] stereo to mono, if it turns out the two channels really differ
 - [ ] GUI for the config
-- [ ] input profiles: remap, DPI, disable keys, per-window switching. Needs
-      `/dev/uinput`, which this machine does not have, and active window
+- [ ] input profiles: DPI, disable keys, and switching by active window. The
+      remap part is done, and the daemon picks up a changed profile while it
+      runs; choosing the profile automatically still needs active window
       detection on Wayland
 - [ ] RGB control with scripts and time-of-day profiles. Needs raw HID access,
       which this machine does not expose
@@ -442,8 +529,14 @@ reports on this.
 - [ ] direct PipeWire graph control, instead of going through pactl
 - [ ] Flatpak packaging, AUR
 
-Window tracking on Wayland is the hard part of input profiles: compositors do
-not hand that out freely. Worth checking before investing in that module.
+Remapping needs `/dev/uinput`, which this machine does not have, so the router
+has never run against real hardware. The daemon falls back to reading the
+keyboard without remapping and says so in the log, rather than refusing to
+start: push-to-talk is worth more than a caps-lock swap.
+
+Window tracking on Wayland is the hard part of the rest of input profiles:
+compositors do not hand that out freely. Worth checking before investing in that
+module.
 
 Stereo to mono is listed in the original notes as a fix for phasing on a mono
 jack. It is not implemented, and the reason was misdiagnosed once already:

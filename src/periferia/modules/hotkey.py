@@ -13,7 +13,7 @@ import os
 import re
 import select
 import time
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -257,25 +257,32 @@ def device_group(dev: Any, name: str, path: Path) -> str:
     return physical_device_id(name) or str(path)
 
 
-def find_keyboards(
+def stable_link_name(name: str) -> str:
+    """The by-id or by-path name of a node, or "" when there is none.
+
+    list_input_devices() walks /dev/input/by-id and /dev/input/by-path first and
+    then the bare event nodes. Only the first two give a name that survives a
+    reboot, and the bare nodes arrive under their own file name, which is what
+    tells the two apart here.
+    """
+    return "" if name.startswith("event") else name
+
+
+def find_keyboards_detailed(
     preferred: str = "auto", *, include_pointers: bool = False
-) -> list[Path]:
-    """Every usable keyboard, not just the first one.
+) -> list[tuple[Path, str, str, str]]:
+    """Every usable keyboard as (event node, device name, physical path, by-id name).
 
-    A machine can easily have three: the laptop keyboard, an external USB one
-    and a Bluetooth one. Listening to a single device means the PTT key works
-    only on that device, which looks like a broken key elsewhere. "auto"
-    returns all of them. An explicit value may list several, comma separated.
-
-    Pointing devices are included when `include_pointers` is set, which the
-    daemon does only when the PTT key is a mouse button. Reading a mouse needs
-    an extra udev rule, so nobody should pay for it until they ask for it.
+    The last two strings are what a keyboard is remembered by across sessions,
+    and either one is enough. The event node is not: it is assigned in
+    enumeration order and comes back different after a reboot, so a node on its
+    own identifies nothing.
     """
     if InputDevice is None:
         return []
 
     if preferred and preferred != "auto":
-        wanted: list[Path] = []
+        found: list[tuple[Path, str, str, str]] = []
         for part in preferred.split(","):
             part = part.strip()
             if not part:
@@ -284,12 +291,21 @@ def find_keyboards(
             if not path.exists():
                 log.warning("configured device %s not found", path)
                 continue
-            wanted.append(path)
-        if wanted:
-            return wanted
-        return []
+            try:
+                dev = open_device(path)
+            except OSError as exc:
+                log.warning("cannot open configured device %s: %s", path, exc)
+                continue
+            try:
+                phys = str(getattr(dev, "phys", "") or "")
+                name = str(getattr(dev, "name", "") or "")
+            finally:
+                with contextlib.suppress(OSError):
+                    dev.close()
+            found.append((path, name or path.name, phys, stable_link_name(path.name)))
+        return found
 
-    found: list[Path] = []
+    found = []
     seen: set[str] = set()
     for target, name in list_input_devices():
         try:
@@ -300,6 +316,8 @@ def find_keyboards(
         try:
             ours = is_virtual_device(getattr(dev, "name", "") or "")
             usable = is_keyboard(dev) or (include_pointers and is_pointer(dev))
+            phys = str(getattr(dev, "phys", "") or "")
+            device_name = str(getattr(dev, "name", "") or "")
         finally:
             with contextlib.suppress(OSError):
                 dev.close()
@@ -322,8 +340,30 @@ def find_keyboards(
                 target,
             )
         seen.add(group)
-        found.append(target)
+        found.append((target, device_name or name, phys, stable_link_name(name)))
     return found
+
+
+def find_keyboards(
+    preferred: str = "auto", *, include_pointers: bool = False
+) -> list[Path]:
+    """Every usable keyboard, not just the first one.
+
+    A machine can easily have three: the laptop keyboard, an external USB one
+    and a Bluetooth one. Listening to a single device means the PTT key works
+    only on that device, which looks like a broken key elsewhere. "auto"
+    returns all of them. An explicit value may list several, comma separated.
+
+    Pointing devices are included when `include_pointers` is set, which the
+    daemon does only when the PTT key is a mouse button. Reading a mouse needs
+    an extra udev rule, so nobody should pay for it until they ask for it.
+    """
+    return [
+        target
+        for target, _name, _phys, _by_id in find_keyboards_detailed(
+            preferred, include_pointers=include_pointers
+        )
+    ]
 
 
 def pick_device(preferred: str = "auto") -> Path | None:
@@ -347,6 +387,9 @@ class HotkeyListener:
 
     macro_codes: Mapping[int, Callable[[], None]] = {}
     on_any_key: Callable[[float, int, int], None] | None = None
+    # Same reason as the two above: a bare instance built by a test has no
+    # __init__ behind it, and poll() reads this on every idle pass.
+    _rescan: Callable[[], list[Path]] | None = None
 
     def __init__(
         self,
@@ -360,6 +403,7 @@ class HotkeyListener:
         on_panic: Callable[[], None] | None = None,
         macro_codes: Mapping[int, Callable[[], None]] | None = None,
         on_any_key: Callable[[float, int, int], None] | None = None,
+        rescan: Callable[[], list[Path]] | None = None,
     ) -> None:
         if InputDevice is None:
             raise RuntimeError("evdev is not installed")
@@ -377,6 +421,11 @@ class HotkeyListener:
         # macro. A macro recorded through a listener that still fired PTT would
         # open the microphone on its own first keypress.
         self.on_any_key = on_any_key
+        # Returns keyboards that are newly present, so one plugged in after the
+        # daemon started can be picked up. None means never look: the pick-key
+        # tool waits for a keypress and has no reason to go looking for more
+        # keyboards while it does.
+        self._rescan = rescan
         self._devs: dict[Path, Any] = {}
         self._down = False
         self._panic_down = False
@@ -401,6 +450,40 @@ class HotkeyListener:
         """Forget that a key is held, so the next press is not a duplicate."""
         self._down = False
         self._panic_down = False
+
+    def add_devices(self, paths: Iterable[Path]) -> int:
+        """Start watching keyboards that appeared after startup. Returns the count.
+
+        A keyboard plugged in while the daemon runs used to stay dead until the
+        daemon was restarted. The PTT key on the new keyboard simply did nothing,
+        which looks like a broken key rather than a missing device.
+        """
+        added = 0
+        for path in paths:
+            if path in self._devs:
+                continue
+            try:
+                self._devs[path] = open_device(path)
+            except OSError as exc:
+                log.warning("cannot watch newly found %s: %s", path, exc)
+                continue
+            added += 1
+            log.info("now watching %s, it appeared while running", path)
+        return added
+
+    def _pick_up_new_devices(self) -> None:
+        if self._rescan is None:
+            return
+        try:
+            found = self._rescan()
+        except Exception as exc:
+            # Looking for keyboards is housekeeping. Whatever went wrong there,
+            # the keyboards already open keep working.
+            log.debug("cannot look for new keyboards: %s", exc)
+            return
+        if found:
+            self.add_devices(found)
+            log.info("watching %d device(s) now", len(self._devs))
 
     def _drop(self, path: Path, reason: str) -> None:
         dev = self._devs.pop(path, None)
@@ -443,6 +526,10 @@ class HotkeyListener:
                     continue
                 for event in events:
                     self._handle(event.type, event.code, event.value)
+            # Only after the wait, so a keyboard that is plugged in is picked up
+            # on the next pass rather than inside this one.
+            if not readable:
+                self._pick_up_new_devices()
             return
 
     def _handle(self, ev_type: int, code: int, value: int) -> None:

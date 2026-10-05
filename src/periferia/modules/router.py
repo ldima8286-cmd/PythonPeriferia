@@ -123,6 +123,7 @@ class KeyboardRouter:
         on_release: Callable[[], None] | None = None,
         on_panic: Callable[[], None] | None = None,
         macro_codes: Mapping[int, Callable[[], None]] | None = None,
+        rescan: Callable[[], list[Path]] | None = None,
     ) -> None:
         self.devices = [Path(d) for d in devices]
         self.ptt_code = ptt_code
@@ -132,9 +133,11 @@ class KeyboardRouter:
         self.on_press = on_press
         self.on_release = on_release
         self.on_panic = on_panic
-        # Same contract as HotkeyListener, so a macro bound to a key keeps
+# Same contract as HotkeyListener, so a macro bound to a key keeps
         # working whether or not a remap table happens to be active.
         self.macro_codes = dict(macro_codes or {})
+        # Finds keyboards plugged in after startup, same as the plain listener.
+        self._rescan = rescan
 
         self._channels: list[_Channel] = []
         self._down = False
@@ -278,7 +281,49 @@ class KeyboardRouter:
                 else:
                     self._drain(channel)
             if time.monotonic() >= deadline:
+                self._pick_up_new_devices()
                 return
+
+    def _pick_up_new_devices(self) -> None:
+        """Add keyboards that appeared after the daemon started.
+
+        All or nothing, like open(). A half-remapped pair is worse than either
+        correct or untouched, so a keyboard that cannot be grabbed here is left
+        alone and the ones already remapped carry on.
+        """
+        if self._rescan is None:
+            return
+        try:
+            found = self._rescan()
+        except Exception as exc:
+            log.debug("cannot look for new keyboards: %s", exc)
+            return
+        wanted = [p for p in found if p not in {c.path for c in self._channels}]
+        if not wanted:
+            return
+
+        added: list[_Channel] = []
+        try:
+            for path in wanted:
+                source = open_device(path)
+                channel = _Channel(path=path, source=source, virtual=None)
+                added.append(channel)
+                channel.virtual = self._create(source, path)
+            for channel in added:
+                channel.source.grab()
+                channel.grabbed = True
+        except Exception as exc:
+            for channel in added:
+                self._discard(channel)
+            log.warning("cannot remap %s, leaving it unremapped: %s", wanted[0], exc)
+            return
+
+        self._channels.extend(added)
+        log.info(
+            "now remapping %d more device(s) through virtual keyboards: %s",
+            len(added),
+            ", ".join(c.path.name for c in added),
+        )
 
     def _forward_led(self, channel: _Channel) -> None:
         """Send the desktop's key-light changes back to the real keyboard.

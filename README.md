@@ -240,11 +240,31 @@ Four things, in the order they get asked for:
 | --- | --- |
 | Состояние | Is it working right now, and what is in the way |
 | Профили | What does this do to my keys in which window |
-| Клавиши | Change a single remap |
+| Правка профиля | Change one profile: which window it applies to, its keys, its pointer speed |
 | Проверка | What is wrong with what I wrote |
 
 The last page is the same checks `periferia profiles` runs, so a config can be
 inspected without starting anything.
+
+One profile is edited at a time. Saving writes only that profile's `name`,
+`match`, `remap` and `pointer`, and leaves the rest of the file alone: comments,
+section order, unknown keys, and any macros inside the profile are all kept as
+they were. Macros are shown as a count and not edited here, because a recorded
+sequence has its own timing that a table of key presses cannot ask for.
+
+Every profile is editable, not just the first one, so a profile that names a
+window can be changed without hand-editing the file. Choosing another profile in
+the list drops whatever was unsaved in the one you were in, which is why saving
+is an explicit button.
+
+A profile's `match` is entered as plain text: `Класс окна` takes what the program
+calls itself (`steam`), `Имя окна` the process name, `Заголовок` the window
+title. Tick **применять везде** to make the profile the fallback one, which greys
+the three fields out because a fallback has no conditions to match.
+
+**Скорость указателя** is KWin's pointer speed, from 0.05 to 10, where 1.0 is
+the desktop's own. Tick **менять** to put a speed in this profile; a profile
+without that tick has no `pointer` section and never touches your settings.
 
 ## Which profile is in force
 
@@ -614,7 +634,7 @@ reports on this.
 ## Roadmap
 
 - [ ] stereo to mono, if it turns out the two channels really differ
-- [ ] GUI for the config
+- [x] GUI for the config: profiles only, one at a time, comments kept
 - [x] input profiles: remap, turn a key off entirely, pointer speed per
       profile, and on KWin the profile follows the focused window
 - [ ] RGB control with scripts and time-of-day profiles. Needs raw HID access,

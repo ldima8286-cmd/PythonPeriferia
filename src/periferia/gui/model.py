@@ -88,30 +88,75 @@ def available_keys() -> list[KeyChoice]:
 Row = tuple[str, str]
 
 
-def rows_from_profiles(profiles: Iterable[Any]) -> list[Row]:
-    """Flatten the configured profiles into editable rows.
+# What a profile can be matched on, in the order the window asks for them.
+MATCH_FIELDS = ("resource_class", "resource_name", "caption")
 
-    Only the profile in effect is editable. A second profile cannot be selected
-    yet, so showing its table in an editor that cannot choose it would invite
-    somebody to change something that never applies.
+
+@dataclasses.dataclass
+class ProfileDraft:
+    """One profile as the window holds it: what is being edited, not what is set.
+
+    A draft is deliberately not a ProfileConfig. A config entry carries what the
+    file says, including macros this window does not edit, so writing one back
+    would either lose those or need fields here for things the window has no
+    opinion about.
     """
-    rows: list[Row] = []
-    for entry in profiles:
-        if not getattr(entry, "enabled", True):
-            continue
-        remap = getattr(entry, "remap", None) or {}
-        if not remap:
-            continue
-        rows.extend((str(k), str(v)) for k, v in remap.items())
-        break
-    return rows
+
+    name: str = "default"
+    match: dict[str, str] = dataclasses.field(default_factory=dict)
+    rows: list[Row] = dataclasses.field(default_factory=list)
+    speed: float | None = None
+
+    def clean(self) -> ProfileDraft:
+        """The same draft with blank fields dropped.
+
+        Saved on every change, so an emptied field has to stop existing rather
+        than be written as an empty string, which a profile matcher would treat
+        as a criterion that can never match.
+        """
+        match = {
+            field: value.strip()
+            for field, value in self.match.items()
+            if field in MATCH_FIELDS and str(value).strip()
+        }
+        return ProfileDraft(
+            name=self.name.strip() or "default",
+            match=match,
+            rows=[(str(k), str(v)) for k, v in self.rows],
+            speed=self.speed,
+        )
 
 
-def profile_name(profiles: Iterable[Any]) -> str:
-    for entry in profiles:
-        if getattr(entry, "enabled", True) and (getattr(entry, "remap", None) or {}):
-            return str(getattr(entry, "name", "default"))
-    return "default"
+def draft_from_profile(entry: Any) -> ProfileDraft:
+    """A draft holding what the window can edit about one configured profile."""
+    return ProfileDraft(
+        name=str(getattr(entry, "name", "") or ""),
+        match={
+            str(k): str(v)
+            for k, v in (getattr(entry, "match", None) or {}).items()
+            if str(k) in MATCH_FIELDS
+        },
+        rows=[(str(k), str(v)) for k, v in (getattr(entry, "remap", None) or {}).items()],
+        speed=getattr(getattr(entry, "pointer", None), "speed", None),
+    )
+
+
+def drafts_from_config(profiles: Iterable[Any]) -> list[ProfileDraft]:
+    return [draft_from_profile(entry) for entry in profiles]
+
+
+def first_editable(profiles: Iterable[Any]) -> ProfileDraft | None:
+    """The profile the window opens on.
+
+    The first one that changes anything. A fallback profile with an empty table
+    is a real thing people write, but opening the editor on a profile that does
+    nothing gives a blank page and the impression that nothing is configured.
+    """
+    drafts = drafts_from_config(profiles)
+    for draft in drafts:
+        if draft.rows or draft.match or draft.speed is not None:
+            return draft
+    return drafts[0] if drafts else None
 
 
 def add_row(rows: Sequence[Row], source: str, target: str) -> list[Row]:
@@ -191,22 +236,32 @@ def load_raw(path: Path) -> dict[str, Any]:
     return dict(data or {})
 
 
-def save_profiles(path: Path, rows: Sequence[Row], name: str) -> None:
-    """Write the profile back, touching nothing else in the file.
+def save_draft(
+    path: Path,
+    draft: ProfileDraft,
+    previous_name: str | None = None,
+) -> None:
+    """Write one profile back, touching nothing else in the file.
 
     Round-trip YAML keeps comments, key order and the shape of everything the
     window has no opinion about. A settings window that rewrites the whole file
     from its own idea of the schema would quietly delete whatever it does not
     know, and this config already has sections the window will not show for a
     long time.
-    """
-    mapping = rows_to_mapping(rows)
 
+    The profile is found by `previous_name` when it is being renamed, and by its
+    own name otherwise. Only `name`, `match`, `remap` and `pointer` are written:
+    a profile's macros and its enabled flag stay whatever the file said.
+    """
+    cleaned = draft.clean()
+    mapping = rows_to_mapping(cleaned.rows)
+
+    text = path.read_text(encoding="utf-8") if path.is_file() else ""
     if HAVE_ROUND_TRIP:
-        text = path.read_text(encoding="utf-8") if path.is_file() else ""
         yaml = _yaml_for(text)
-        existing = yaml.load(text) if text else None
-        data = existing if existing is not None else {}
+        data = yaml.load(text) if text else None
+        if data is None:
+            data = {}
         if not isinstance(data, dict):
             data = {}
     else:
@@ -215,21 +270,73 @@ def save_profiles(path: Path, rows: Sequence[Row], name: str) -> None:
         yaml = None
         data = load_raw(path)
 
-    profiles = [
-        p for p in (data.get("profiles") or []) if isinstance(p, dict) and p.get("enabled", True)
-    ]
+    profiles = data.get("profiles")
+    if profiles is None:
+        profiles = []
+    wanted = previous_name or cleaned.name
+    existing = next(
+        (
+            p
+            for p in profiles
+            if isinstance(p, dict) and str(p.get("name", "")) == wanted
+        ),
+        None,
+    )
+    if existing is None:
+        existing = {}
+        profiles.append(existing)
+
+    existing["name"] = cleaned.name
+    if cleaned.match:
+        existing["match"] = cleaned.match
+    else:
+        existing.pop("match", None)
     if mapping:
-        if profiles:
-            # Edit the node in place. Building a replacement list and assigning
-            # it throws away the indentation the file already used, so every
-            # save would reflow the user's config for no reason.
-            keep = profiles[0]
-            for stale in [k for k in keep if k not in ("name", "remap")]:
-                del keep[stale]
-            keep["name"] = name
-            keep["remap"] = mapping
-        else:
-            data["profiles"] = [{"name": name, "remap": mapping}]
+        existing["remap"] = mapping
+    else:
+        existing.pop("remap", None)
+    if cleaned.speed is not None:
+        existing["pointer"] = {"speed": cleaned.speed}
+    else:
+        existing.pop("pointer", None)
+
+    data["profiles"] = profiles
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if yaml is not None:
+        with path.open("w", encoding="utf-8") as fh:
+            yaml.dump(data, fh)
+    else:
+        import yaml as pyyaml
+
+        path.write_text(pyyaml.safe_dump(data, sort_keys=False), encoding="utf-8")
+
+
+def delete_draft(path: Path, name: str) -> bool:
+    """Remove one profile. False when it was not there to begin with.
+
+    Macros defined inside the profile go with it. They are the profile's own,
+    and leaving them behind under a name nothing claims would make them
+    unreachable in a way that is hard to notice.
+    """
+    text = path.read_text(encoding="utf-8") if path.is_file() else ""
+    if HAVE_ROUND_TRIP:
+        yaml = _yaml_for(text)
+        data = yaml.load(text) if text else None
+        if not isinstance(data, dict):
+            return False
+    else:
+        import yaml as pyyaml
+
+        yaml = None
+        data = load_raw(path)
+
+    profiles = data.get("profiles") or []
+    kept = [p for p in profiles if not (isinstance(p, dict) and str(p.get("name", "")) == name)]
+    if len(kept) == len(profiles):
+        return False
+    if kept:
+        data["profiles"] = kept
     else:
         data.pop("profiles", None)
 
@@ -241,6 +348,41 @@ def save_profiles(path: Path, rows: Sequence[Row], name: str) -> None:
         import yaml as pyyaml
 
         path.write_text(pyyaml.safe_dump(data, sort_keys=False), encoding="utf-8")
+    return True
+
+
+def check_draft(draft: ProfileDraft, others: Sequence[ProfileDraft] = ()) -> str | None:
+    """What is wrong with this draft, or None if it would load.
+
+    Runs the same checks the file does, so the window refuses before it saves
+    rather than the daemon refusing after it has grabbed the keyboard.
+    """
+    from ..core.config import PointerConfig, ProfileConfig
+
+    cleaned = draft.clean()
+    profiles = [
+        ProfileConfig(
+            name=d.name,
+            match=dict(d.match),
+            remap=rows_to_mapping(d.rows),
+            pointer=PointerConfig(speed=d.speed) if d.speed is not None else None,
+        )
+        for d in [cleaned, *others]
+    ]
+    from ..core import validate
+
+    report = validate.check_profiles(profiles)
+    if report.errors:
+        return str(report.errors[0])
+
+    # The router's own rules as well as the config's. A modifier target is only
+    # refused where the table is built, and a window that saves without asking
+    # leaves the daemon to refuse after it has grabbed the keyboard.
+    try:
+        build_remap(rows_to_mapping(cleaned.rows))
+    except RemapError as exc:
+        return str(exc)
+    return None
 
 
 # One colour per state, shared by the tray, the overlay and the window, so the

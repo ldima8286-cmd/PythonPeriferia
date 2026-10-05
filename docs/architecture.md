@@ -40,8 +40,23 @@ src/periferia/
     macrodevice.py       replays macros through uinput
     remap.py             which key becomes which key
     router.py            grabs the keyboard and remaps what it emits
-  gui/                   the window
+  gui/
+    model.py             what the window can change: one profile, as a draft
+    window.py            the pages, and the profile editor
+    pages.py             read-only views of state, profiles and problems
+    tray.py              tray icon and its state file
 ```
+
+`gui/model.py` is the only place that knows how a profile is written. The
+widgets hold a `ProfileDraft` and hand it over; nothing in `window.py` builds a
+config. Two reasons: the editor is a table, and the file is a document with
+comments in it, so the two are kept apart.
+
+The draft carries only `name`, `match`, `remap` and `pointer`. Everything else
+in a profile -- its macros, its `enabled` flag -- is in the file and is left
+there by `save_draft`, which rewrites the one profile it was given through
+ruamel's round-trip loader. That is why editing a profile from the window cannot
+delete a macro it does not show.
 
 Three rules the code follows:
 

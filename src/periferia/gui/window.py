@@ -18,12 +18,16 @@ from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QAction, QKeySequence
 from PySide6.QtWidgets import (
     QApplication,
+    QCheckBox,
     QComboBox,
     QCompleter,
+    QDoubleSpinBox,
+    QFormLayout,
     QFrame,
     QHBoxLayout,
     QHeaderView,
     QLabel,
+    QLineEdit,
     QListWidget,
     QMainWindow,
     QPushButton,
@@ -39,7 +43,7 @@ from ..core.config import Config, load
 from ..modules.remap import RemapError
 from . import model, pages
 
-PAGES = ("Состояние", "Профили", "Клавиши", "Проверка")
+PAGES = ("Состояние", "Профили", "Правка профиля", "Проверка")
 
 log = logging.getLogger("periferia.gui")
 
@@ -156,6 +160,208 @@ class RemapEditor(QWidget):
             self._on_change(self.current_rows())
 
 
+class ProfileEditor(QWidget):
+    """One profile: which window it applies to, its keys, and its pointer speed.
+
+    A profile is the unit here rather than a key, because a key means nothing on
+    its own. Which window it applies to and what it does to the pointer live in
+    the same profile and would otherwise need a second window to edit.
+
+    Macros defined inside the profile are shown as a count and not edited. They
+    are a recording with its own timing, and a table of key presses cannot ask
+    for one, so editing them here would mean editing them somewhere else with a
+    second set of rules.
+    """
+
+    def __init__(
+        self,
+        on_save: Callable[[model.ProfileDraft, str | None], None] | None = None,
+        on_delete: Callable[[str], None] | None = None,
+        on_new: Callable[[], None] | None = None,
+    ) -> None:
+        super().__init__()
+        self._on_save = on_save
+        self._on_delete = on_delete
+        self._on_new = on_new
+        self._original: str | None = None
+        self._loading = False
+        self._drafts: list[model.ProfileDraft] = []
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(12)
+
+        picker = QHBoxLayout()
+        self.profile = QComboBox()
+        self.profile.currentIndexChanged.connect(self._switched)
+        new_button = QPushButton("Новый")
+        new_button.clicked.connect(self._new)
+        picker.addWidget(QLabel("Профиль"))
+        picker.addWidget(self.profile, 1)
+        picker.addWidget(new_button)
+        layout.addLayout(picker)
+
+        self.name = QComboBox()
+        self.name.setEditable(True)
+        self.name.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
+        layout.addWidget(self.name)
+
+        conditions = QFormLayout()
+        self.match_class = _field()
+        self.match_name = _field()
+        self.match_caption = _field()
+        conditions.addRow("Класс окна", self.match_class)
+        conditions.addRow("Имя окна", self.match_name)
+        conditions.addRow("Заголовок", self.match_caption)
+        layout.addLayout(conditions)
+
+        self.no_conditions = QCheckBox("применять везде (запасной профиль)")
+        self.no_conditions.toggled.connect(self._conditions_toggled)
+        layout.addWidget(self.no_conditions)
+
+        pointer = QHBoxLayout()
+        pointer.addWidget(QLabel("Скорость указателя"))
+        self.speed = QDoubleSpinBox()
+        self.speed.setRange(0.05, 10.0)
+        self.speed.setSingleStep(0.1)
+        self.speed.setDecimals(2)
+        self.speed.setValue(1.0)
+        self.speed.setEnabled(False)
+        self.speed_touched = QCheckBox("менять")
+        self.speed_touched.toggled.connect(self.speed.setEnabled)
+        pointer.addWidget(self.speed)
+        pointer.addWidget(self.speed_touched)
+        pointer.addStretch()
+        layout.addLayout(pointer)
+
+        self.keys = RemapEditor()
+        # Saving belongs to the profile, not to the key table: the table is only
+        # one of the three things a save writes.
+        self.keys.save_button.setVisible(False)
+        layout.addWidget(self.keys, 1)
+
+        row = QHBoxLayout()
+        self.delete_button = QPushButton("Удалить профиль")
+        self.delete_button.clicked.connect(self._delete)
+        self.save_button = QPushButton("Сохранить профиль")
+        self.save_button.clicked.connect(self.save)
+        row.addWidget(self.delete_button)
+        row.addStretch()
+        row.addWidget(self.save_button)
+        layout.addLayout(row)
+
+        self.warning = QLabel()
+        self.warning.setWordWrap(True)
+        self.warning.setStyleSheet("color: #b26a00;")
+        layout.addWidget(self.warning)
+
+    def set_profiles(self, drafts: list[model.ProfileDraft]) -> None:
+        self._drafts = list(drafts)
+        self._loading = True
+        self.profile.blockSignals(True)
+        self.profile.clear()
+        for draft in drafts:
+            self.profile.addItem(draft.name or "без имени", draft.name)
+        self.profile.blockSignals(False)
+        self._loading = False
+        if drafts:
+            self.profile.setCurrentIndex(0)
+            self.set_draft(drafts[0])
+        else:
+            self.set_draft(None)
+
+    def set_draft(self, draft: model.ProfileDraft | None) -> None:
+        self._loading = True
+        self.keys.set_rows(list(draft.rows) if draft else [])
+        self.name.blockSignals(True)
+        self.name.clear()
+        if draft:
+            self.name.addItem(draft.name)
+            self.name.setCurrentIndex(0)
+        self.name.blockSignals(False)
+        self.match_class.setText(draft.match.get("resource_class", "") if draft else "")
+        self.match_name.setText(draft.match.get("resource_name", "") if draft else "")
+        self.match_caption.setText(draft.match.get("caption", "") if draft else "")
+        for field in (self.match_class, self.match_name, self.match_caption):
+            field.setEnabled(not self.no_conditions.isChecked())
+        self.no_conditions.setChecked(not (draft.match if draft else {}))
+        self.speed_touched.setChecked(bool(draft and draft.speed is not None))
+        self.speed.setValue(float(draft.speed) if draft and draft.speed is not None else 1.0)
+        self.delete_button.setEnabled(draft is not None)
+        self.save_button.setEnabled(draft is not None)
+        self._original = draft.name if draft else None
+        self._loading = False
+
+    def _conditions_toggled(self, everywhere: bool) -> None:
+        """A fallback profile has no conditions, so the fields are greyed out
+        rather than left looking like they still do something."""
+        for field in (self.match_class, self.match_name, self.match_caption):
+            field.setEnabled(not everywhere)
+
+    def current_draft(self) -> model.ProfileDraft:
+        match = {}
+        if not self.no_conditions.isChecked():
+            for field, widget in (
+                ("resource_class", self.match_class),
+                ("resource_name", self.match_name),
+                ("caption", self.match_caption),
+            ):
+                if widget.text().strip():
+                    match[field] = widget.text().strip()
+        chosen = str(self.name.currentText()).strip()
+        speed = float(self.speed.value()) if self.speed_touched.isChecked() else None
+        return model.ProfileDraft(
+            name=chosen or chosen_from(self.profile) or "default",
+            match=match,
+            rows=self.keys.current_rows(),
+            speed=speed,
+        )
+
+    def save(self) -> None:
+        draft = self.current_draft()
+        if self._on_save:
+            self._on_save(draft, self._original)
+
+    def _switched(self, index: int) -> None:
+        """Show whichever profile was picked.
+
+        Unsaved edits in the one being left are dropped, which is why the save
+        button is explicit rather than on every keystroke: switching is the only
+        way to lose them, and it says so in the button's place.
+        """
+        if self._loading or index < 0:
+            return
+        wanted = str(self.profile.itemData(index) or "")
+        for draft in self._drafts:
+            if draft.name == wanted:
+                self.set_draft(draft)
+                return
+
+    def _new(self) -> None:
+        if self._on_new:
+            self._on_new()
+
+    def _delete(self) -> None:
+        if self._on_delete and self._original:
+            self._on_delete(self._original)
+
+
+def _field() -> QLineEdit:
+    """A free-typed text box for one match criterion.
+
+    A profile is matched on what a program calls itself, which nobody can type
+    from memory. The list of profiles above therefore doubles as the reminder:
+    what other profiles already match on is what can be typed here.
+    """
+    field = QLineEdit()
+    field.setPlaceholderText("например steam")
+    return field
+
+
+def chosen_from(combo: QComboBox) -> str:
+    return str(combo.currentData() or "").strip()
+
+
 @dataclasses.dataclass
 class WindowPaths:
     config: Path
@@ -225,36 +431,81 @@ class MainWindow(QMainWindow):
         layout = QVBoxLayout(page)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(12)
-        heading = QLabel("Переназначение клавиш")
+        heading = QLabel("Правка профиля")
         heading.setStyleSheet(pages.TITLE_STYLE)
         layout.addWidget(heading)
         note = QLabel(
-            "Переназначение физической клавиши. PTT продолжает работать по исходной "
-            "клавише, а рабочий стол увидит новую."
+            "Один профиль: в каких окнах он применяется, что он делает с клавишами "
+            "и со скоростью указателя. PTT продолжает работать по исходной клавише, "
+            "а рабочий стол увидит новую. Макросы внутри профиля здесь не меняются."
         )
         note.setWordWrap(True)
         note.setStyleSheet(pages.NOTE_STYLE)
         layout.addWidget(note)
-        self.editor = RemapEditor(on_change=self._save)
+        self.editor = ProfileEditor(
+            on_save=self._save,
+            on_delete=self._delete_profile,
+            on_new=self._new_profile,
+        )
         layout.addWidget(self.editor, 1)
         return page
 
     def _load(self) -> None:
-        self.editor.set_rows(model.rows_from_profiles(self._cfg.profiles))
-        self.profile = model.profile_name(self._cfg.profiles)
+        self.editor.set_profiles(model.drafts_from_config(self._cfg.profiles))
 
-    def _save(self, rows: list[model.Row]) -> None:
+    def _new_profile(self) -> None:
+        """An unsaved profile, held in the editor until it is saved.
+
+        Not written on its own: a half-typed profile with a bad key name in it
+        would be in the file, and the daemon reads the file, so a name has to be
+        given before there is anything to save.
+        """
+        draft = model.ProfileDraft(name="новый профиль")
+        self.editor.set_draft(draft)
+        self.editor.keys.set_rows([])
+        self.editor.warning.setText(
+            "Новый профиль. Задайте имя и нажмите «Сохранить профиль»."
+        )
+
+    def _save(self, draft: model.ProfileDraft, previous: str | None) -> None:
+        # Only the profile being edited drops out. Leaving the one it is being
+        # renamed onto in is the point: two profiles with one name cannot both be
+        # picked, and the validator is what says so.
+        others = [
+            d
+            for d in model.drafts_from_config(self._cfg.profiles)
+            if d.name != previous
+        ]
+        problem = model.check_draft(draft, others)
+        if problem is not None:
+            self.editor.warning.setText(problem)
+            return
         try:
-            message = model.check_rows(rows, *_watched_codes(self._cfg))
-            model.save_profiles(self._config_path, rows, self.profile)
-        except (RemapError, OSError) as exc:
+            model.save_draft(self._config_path, draft, previous)
+        except (RemapError, OSError, ValueError) as exc:
             self.statusBar().showMessage(f"Не сохранено: {exc}", 6000)
             return
         self._cfg = _load_or_default(self._config_path)
+        self._load()
         self._recheck()
+        # Worth saying after a reload has thrown the editor away, because
+        # otherwise the warning only ever showed next to the button that made
+        # it, and the button is not what the reader is looking at by then.
+        advisory = model.check_rows(draft.rows, *_watched_codes(self._cfg))
+        self.editor.warning.setText(advisory or "")
         self.statusBar().showMessage("Сохранено. Демон подхватит при перезапуске.", 4000)
-        if message:
-            self.editor.warning.setText(message)
+
+    def _delete_profile(self, name: str) -> None:
+        try:
+            removed = model.delete_draft(self._config_path, name)
+        except OSError as exc:
+            self.statusBar().showMessage(f"Не удалено: {exc}", 6000)
+            return
+        if removed:
+            self._cfg = _load_or_default(self._config_path)
+            self._load()
+            self._recheck()
+            self.statusBar().showMessage(f"Профиль {name} удалён.", 4000)
 
     def _refresh(self) -> None:
         self.status_page.refresh(self._cfg)
@@ -312,4 +563,4 @@ def main_headless() -> None:
     window.show()
     app.processEvents()
     print(f"окно построено: {window.windowTitle()!r} / {window.status_page.big.text()!r}")
-    print(f"строк в редакторе: {window.editor.table.rowCount()}")
+    print(f"строк в редакторе: {window.editor.keys.table.rowCount()}")

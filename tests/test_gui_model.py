@@ -7,7 +7,7 @@ from typing import ClassVar
 import pytest
 from evdev import ecodes
 
-from src.periferia.core.config import ProfileConfig
+from src.periferia.core.config import PointerConfig, ProfileConfig
 from src.periferia.gui import model
 from src.periferia.modules.remap import RemapError
 
@@ -16,28 +16,57 @@ def code(name: str) -> int:
     return ecodes.ecodes[name]
 
 
-class TestRows:
-    def test_empty_profiles_give_no_rows(self):
-        assert model.rows_from_profiles([]) == []
+class TestDrafts:
+    def test_empty_profiles_give_no_drafts(self):
+        assert model.drafts_from_config([]) == []
 
-    def test_disabled_profile_is_ignored(self):
-        entries = [ProfileConfig(name="x", enabled=False, remap={"KEY_A": "KEY_B"})]
-        assert model.rows_from_profiles(entries) == []
-
-    def test_enabled_profile_becomes_rows(self):
+    def test_a_profile_becomes_a_draft(self):
         entries = [ProfileConfig(name="game", remap={"KEY_CAPSLOCK": "KEY_ESC"})]
-        assert model.rows_from_profiles(entries) == [("KEY_CAPSLOCK", "KEY_ESC")]
+        assert model.first_editable(entries).rows == [("KEY_CAPSLOCK", "KEY_ESC")]
 
-    def test_only_the_first_enabled_profile_is_editable(self):
+    def test_every_profile_is_editable_now(self):
+        """Each one used to be unreachable, which meant a profile that names a
+        window could be written but not changed."""
         entries = [
             ProfileConfig(name="a", remap={"KEY_A": "KEY_B"}),
             ProfileConfig(name="b", remap={"KEY_C": "KEY_D"}),
         ]
-        assert model.rows_from_profiles(entries) == [("KEY_A", "KEY_B")]
+        assert [d.name for d in model.drafts_from_config(entries)] == ["a", "b"]
 
-    def test_name_comes_from_the_profile_in_effect(self):
-        assert model.profile_name([ProfileConfig(name="game", remap={"KEY_A": "KEY_B"})]) == "game"
-        assert model.profile_name([]) == "default"
+    def test_a_match_field_the_window_does_not_know_is_left_out(self):
+        """A profile matched on something this window cannot ask for keeps it in
+        the file; dropping it here would delete it on the next save."""
+        entries = [ProfileConfig(name="x", match={"resource_class": "steam", "title": "x"})]
+        assert model.first_editable(entries).match == {"resource_class": "steam"}
+
+    def test_the_pointer_speed_comes_along(self):
+        entries = [
+            ProfileConfig(name="g", pointer=PointerConfig(speed=2.5)),
+        ]
+        assert model.first_editable(entries).speed == 2.5
+
+    def test_a_profile_with_no_speed_says_none_rather_than_the_default(self):
+        """A default of 1.0 written back would put a key in the file that the
+        user never asked for."""
+        entries = [ProfileConfig(name="g")]
+        assert model.first_editable(entries).speed is None
+
+    def test_the_window_opens_on_the_one_that_does_something(self):
+        entries = [
+            ProfileConfig(name="fallback"),
+            ProfileConfig(name="game", remap={"KEY_A": "KEY_B"}),
+        ]
+        assert model.first_editable(entries).name == "game"
+
+    def test_only_empty_profiles_still_open_on_the_first(self):
+        entries = [ProfileConfig(name="a"), ProfileConfig(name="b")]
+        assert model.first_editable(entries).name == "a"
+
+    def test_a_blank_field_stops_existing(self):
+        """An empty criterion would be written and then could never match, which
+        looks exactly like a broken match."""
+        draft = model.ProfileDraft(name="x", match={"resource_class": "  "})
+        assert draft.clean().match == {}
 
 
 class TestEditing:
@@ -88,23 +117,29 @@ class TestPttWarning:
 class TestSaving:
     def test_writes_the_profile(self, tmp_path):
         path = tmp_path / "config.yaml"
-        model.save_profiles(path, [("KEY_CAPSLOCK", "KEY_ESC")], "game")
+        model.save_draft(path, model.ProfileDraft(name="game", rows=[("KEY_CAPSLOCK", "KEY_ESC")]))
         assert "KEY_CAPSLOCK" in path.read_text()
 
     def test_round_trip_returns_the_same_rows(self, tmp_path):
         from src.periferia.core.config import load
 
         path = tmp_path / "config.yaml"
-        model.save_profiles(path, [("KEY_CAPSLOCK", "KEY_ESC")], "game")
-        assert model.rows_from_profiles(load(path).profiles) == [("KEY_CAPSLOCK", "KEY_ESC")]
+        model.save_draft(path, model.ProfileDraft(name="game", rows=[("KEY_CAPSLOCK", "KEY_ESC")]))
+        assert model.first_editable(load(path).profiles).rows == [("KEY_CAPSLOCK", "KEY_ESC")]
 
-    def test_empty_table_removes_the_section(self, tmp_path):
-        path = tmp_path / "config.yaml"
-        model.save_profiles(path, [("KEY_A", "KEY_B")], "game")
-        model.save_profiles(path, [], "game")
+    def test_empty_table_removes_the_remap_but_keeps_the_profile(self, tmp_path):
+        """A profile that stops remapping keys is still a profile: it may still
+        say which window it belongs to."""
         from src.periferia.core.config import load
 
-        assert load(path).profiles == []
+        path = tmp_path / "config.yaml"
+        model.save_draft(path, model.ProfileDraft(name="game", rows=[("KEY_A", "KEY_B")]))
+        model.save_draft(path, model.ProfileDraft(name="game", match={"resource_class": "steam"}))
+
+        left = load(path).profiles
+        assert len(left) == 1
+        assert left[0].name == "game"
+        assert left[0].remap == {}
 
     @pytest.mark.skipif(
         not model.HAVE_ROUND_TRIP, reason="needs ruamel.yaml for comment preservation"
@@ -116,7 +151,9 @@ class TestSaving:
             "  - name: game\n    remap:\n      KEY_A: KEY_B\n",
             encoding="utf-8",
         )
-        model.save_profiles(path, [("KEY_A", "KEY_B"), ("KEY_C", "KEY_D")], "game")
+        model.save_draft(
+            path, model.ProfileDraft(name="game", rows=[("KEY_A", "KEY_B"), ("KEY_C", "KEY_D")])
+        )
         text = path.read_text()
         assert "# моя настройка" in text
         assert "# е" in text
@@ -125,7 +162,7 @@ class TestSaving:
     def test_other_sections_are_left_alone(self, tmp_path):
         path = tmp_path / "config.yaml"
         path.write_text("audio:\n  hold_ms: 150\nptt:\n  ptt_key: KEY_GRAVE\n", encoding="utf-8")
-        model.save_profiles(path, [("KEY_A", "KEY_B")], "game")
+        model.save_draft(path, model.ProfileDraft(name="game", rows=[("KEY_A", "KEY_B")]))
         from src.periferia.core.config import load
 
         cfg = load(path)
@@ -135,7 +172,7 @@ class TestSaving:
     def test_unknown_sections_survive(self, tmp_path):
         path = tmp_path / "config.yaml"
         path.write_text("ptt:\n  ptt_key: KEY_GRAVE\nfuture_thing:\n  x: 1\n", encoding="utf-8")
-        model.save_profiles(path, [("KEY_A", "KEY_B")], "game")
+        model.save_draft(path, model.ProfileDraft(name="game", rows=[("KEY_A", "KEY_B")]))
         assert "future_thing" in path.read_text()
 
 
@@ -279,7 +316,7 @@ class TestFormatting:
         path.write_text(
             "profiles:\n  - name: game\n    remap:\n      KEY_A: KEY_B\n", encoding="utf-8"
         )
-        model.save_profiles(path, [("KEY_A", "KEY_C")], "game")
+        model.save_draft(path, model.ProfileDraft(name="game", rows=[("KEY_A", "KEY_C")]))
         assert "  - name: game" in path.read_text()
 
     def test_flush_lists_stay_flush(self, tmp_path):
@@ -287,13 +324,13 @@ class TestFormatting:
         path.write_text(
             "profiles:\n- name: game\n  remap:\n    KEY_A: KEY_B\n", encoding="utf-8"
         )
-        model.save_profiles(path, [("KEY_A", "KEY_C")], "game")
+        model.save_draft(path, model.ProfileDraft(name="game", rows=[("KEY_A", "KEY_C")]))
         assert "\n- name: game" in path.read_text()
 
     def test_quoted_values_keep_their_quotes(self, tmp_path):
         path = tmp_path / "config.yaml"
         path.write_text('ptt:\n  ptt_key: "KEY_GRAVE"\n', encoding="utf-8")
-        model.save_profiles(path, [("KEY_A", "KEY_B")], "game")
+        model.save_draft(path, model.ProfileDraft(name="game", rows=[("KEY_A", "KEY_B")]))
         assert '"KEY_GRAVE"' in path.read_text()
 
 

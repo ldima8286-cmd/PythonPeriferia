@@ -29,9 +29,8 @@ than any one application.
 The daemon watches the config file, so a finished macro recording or an edited
 keyboard profile is picked up within about a second. See "Macros".
 
-  Not built yet: RGB. The input profiles are configurable and validated, but
-  nothing follows the focused window yet, so a profile only takes effect as the
-  first enabled one. See "Roadmap".
+  Not built yet: RGB. The input profiles are configurable and validated, and on
+  KWin the profile follows the focused window. See "Roadmap".
 
 ### Knowing whether the microphone is open
 
@@ -247,6 +246,39 @@ Four things, in the order they get asked for:
 The last page is the same checks `periferia profiles` runs, so a config can be
 inspected without starting anything.
 
+## Which profile is in force
+
+A profile with a `match` applies itself to the window you are in:
+
+```yaml
+profiles:
+  - name: default          # no match, so this one is the fallback
+    remap: { KEY_CAPSLOCK: KEY_ESC }
+  - name: game
+    match: { resource_class: [steam, lutris] }
+    remap: { KEY_CAPSLOCK: KEY_TAB }
+```
+
+`match` takes `resource_class`, `resource_name` and `caption`, one value or a
+list of them, and every field written has to match. The first profile that
+matches wins, so put the specific ones first and leave one without a `match` at
+the end as the fallback.
+
+Switching applies immediately. Rebuilding a remap table takes the keyboard for
+as long as it takes, so it is done once per switch rather than once per event,
+and only when the profile actually changes.
+
+On **KWin** the window comes from a small script loaded into the compositor over
+the session bus. Nothing else is supported: GNOME, X11 and other Wayland
+compositors do not expose the focused window without a portal that does not
+cover this, so there the first enabled profile stays in force and the log says
+so. `periferia window` prints what the watcher currently sees, which is the
+first thing to check when a profile does not apply.
+
+Adding or removing the last `match` starts or stops the watcher on the next
+config save. A config with no `match` at all loads no script into the session
+and behaves exactly as before.
+
 ## The indicator
 
 One dot, three colours, no configuration. It reads the state file, so it can be
@@ -369,7 +401,9 @@ the daemon notices within about a second. A recording is playable as soon as it
 says `saved`; there is nothing to restart.
 
 The same is true of the keyboard profile. Edit `profiles:` and save, and the
-keyboard is picked up again a second later.
+keyboard is picked up again a second later. Adding the first `match` starts
+following the focused window on that same save, and removing the last one stops
+it.
 
 Neither reloads the microphone, the virtual source or the audio processing. Those
 own a PipeWire node that your applications are pointed at, and rebuilding it would
@@ -535,10 +569,9 @@ reports on this.
 
 - [ ] stereo to mono, if it turns out the two channels really differ
 - [ ] GUI for the config
-- [ ] input profiles: DPI, disable keys, and switching by active window. The
-      remap part is done, and the daemon picks up a changed profile while it
-      runs; choosing the profile automatically still needs active window
-      detection on Wayland
+- [ ] input profiles: DPI and disable keys. The remap part is done, the daemon
+      picks up a changed profile while it runs, and on KWin the profile follows
+      the focused window
 - [ ] RGB control with scripts and time-of-day profiles. Needs raw HID access,
       which this machine does not expose
 - [ ] compressor and de-esser. Not going to happen here: filter-chain will not
@@ -552,9 +585,13 @@ has never run against real hardware. The daemon falls back to reading the
 keyboard without remapping and says so in the log, rather than refusing to
 start: push-to-talk is worth more than a caps-lock swap.
 
-Window tracking on Wayland is the hard part of the rest of input profiles:
-compositors do not hand that out freely. Worth checking before investing in that
-module.
+Window tracking is verified only against the message format the KWin script
+sends. There is no KWin session in the sandbox this was written in, so the D-Bus
+script load, the `run()` call that KWin 5 needs and KWin 6 does not have, and
+the settling under a real alt-tab are all untested against a compositor. The
+parsing, the choice of profile and the daemon wiring are tested with a fake bus.
+On any other compositor the watcher does not start and the first enabled profile
+stays in force.
 
 Stereo to mono is listed in the original notes as a fix for phasing on a mono
 jack. It is not implemented, and the reason was misdiagnosed once already:

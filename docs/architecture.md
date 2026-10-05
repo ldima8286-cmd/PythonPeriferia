@@ -28,6 +28,8 @@ src/periferia/
     watcher.py           notices that the config file changed
     windowprofile.py     picks a profile for the focused window
     activewindow.py      the compositor, where it can be asked
+    windowbus.py         the bus name a compositor script reports to
+    windowwatch.py       the loaded KWin script, polled and settled
     validate.py          what will not work, and why
     daemon.py            wiring and lifecycle
   modules/
@@ -89,9 +91,11 @@ doing here is correctness, not speed.
 
 - DSP. Noise suppression, echo cancellation and VAD are PipeWire module
   properties. Compressor and de-esser may eventually need LADSPAF.
-- Window tracking. On Wayland, compositors do not expose the active window
-  freely. This is the main risk for the input-profiles module and should be
-  investigated before that work starts.
+- Window tracking on anything but KWin. On Wayland, compositors do not expose
+  the active window freely, so `windowwatch` loads a KWin script and speaks
+  `org.kde.KWin.Scripting` over the session bus. GNOME and X11 are not
+  supported: a config with `match` there falls back to the first enabled
+  profile and says so in the log.
 - RGB. Needs per-vendor HID protocols, many of them undocumented. Likely a
   research task rather than an engineering one.
 

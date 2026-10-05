@@ -16,6 +16,8 @@ from types import FrameType
 
 from ..core import keyboards as keyboards_mod
 from ..core import pipewire as pipewire_mod
+from ..core import windowprofile as windowprofile_mod
+from ..core import windowwatch as windowwatch_mod
 from ..modules.audio import VirtualMic
 from ..modules.hotkey import (
     HotkeyListener,
@@ -25,7 +27,7 @@ from ..modules.hotkey import (
 )
 from ..modules.macrodevice import MacroPlayer
 from ..modules.processing import MicProcessing
-from ..modules.remap import RemapError, active_remap
+from ..modules.remap import RemapError, active_remap, remap_for
 from ..modules.router import KeyboardRouter
 from . import config as config_mod
 from . import logging_setup
@@ -85,6 +87,10 @@ class Daemon:
         # Whether the listener currently holds the devices open. A config reload
         # rebuilds the listener and has to know whether it must reopen it.
         self._listener_open = False
+        # Follows the focused window so a profile can claim itself, and the name
+        # of the one in force, so a switch does not rebuild what is already up.
+        self._windows: windowwatch_mod.WindowWatcher | None = None
+        self._window_profile: str | None = None
         # Watches the config file, so a finished macro recording goes live
         # without restarting the daemon.
         self._config_watcher: watcher_mod.ConfigWatcher | None = None
@@ -163,6 +169,7 @@ class Daemon:
             log.debug("no config path, cannot reload")
             return False
 
+        old_profiles = self.cfg.profiles
         try:
             fresh = config_mod.load(path)
         except Exception as exc:
@@ -172,12 +179,25 @@ class Daemon:
         self.cfg = fresh
         self.load_macros()
 
+        # A reload that adds a match wants the watcher, and one that removes the
+        # last match wants it gone. Decided on the config rather than on whether a
+        # watcher happens to be running, so the two cannot disagree.
+        if windowwatch_mod.wants_window(fresh.profiles) != windowwatch_mod.wants_window(
+            old_profiles
+        ):
+            self._stop_window_watcher()
+            self._start_window_watcher()
+
         old_table = self._loaded_table
         try:
-            table = active_remap(fresh.profiles)
+            table = self._table_for_now()
         except RemapError as exc:
+            # Not the same as a table of None. None means the config asks for no
+            # remapping and that is obeyed; a table that cannot be built is a
+            # mistake in the file, and obeying half of it would turn a typo into
+            # keys quietly going back to normal.
             log.error("ignoring the keyboard profile: %s", exc)
-            table = None
+            return False
 
         if table == old_table:
             log.info("macros reloaded, the keyboard profile did not change")
@@ -186,8 +206,7 @@ class Daemon:
         # Only the keyboard is rebuilt, and only when the remap table actually
         # changed. Saving a macro must not cost the user their keyboard for a
         # second, and the profile is the expensive part.
-        applied = self._swap_profile(table)
-        if not applied:
+        if not self._swap_profile(table):
             log.warning("cannot apply the new keyboard profile, keeping the old one")
             self._swap_profile(old_table)
             return False
@@ -196,17 +215,33 @@ class Daemon:
             log.warning("the new keyboard profile did not take, running without it")
         return True
 
+    def _table_for_now(self) -> dict[int, int] | None:
+        """The table that should be in force right now.
+
+        The focused window decides when it can be asked, and the first enabled
+        profile when it cannot. The two are the same call for anyone who never
+        writes a match, so a config that only wants a profile by hand does not
+        have to know any of this.
+        """
+        window = self._windows.last if self._windows is not None else None
+        if window is not None and window.has_identifier():
+            profile = windowprofile_mod.select(self.cfg.profiles, window)
+            if profile is not None:
+                return remap_for(profile)
+            return None
+        return active_remap(self.cfg.profiles)
+
     def _swap_profile(self, table: dict[int, int] | None) -> bool:
-        """Rebuild the listener for a different remap table. False if it would not start.
+        """Rebuild the listener for a different remap table.
+
+        `table` of None means "leave the keys alone", which is what a profile
+        with no remap in it means and what a window nothing claims means.
 
         The old listener is kept until the new one is actually open. A reload that
         left no way to read the keyboard would take push-to-talk with it, and a
         config the user just typed is the least trustworthy thing to bet the
         microphone on.
         """
-        if table is None:
-            return False
-
         current = self._listener
         assert current is not None
         devices = list(current.devices)
@@ -225,7 +260,12 @@ class Daemon:
                 self._listener = plain
                 plain.open()
                 self._loaded_table = None
+                self._listener_open = True
                 return True
+            # Closing the old one cleared the flag, and a flag left false here
+            # makes the next swap skip the open, which silently costs the user
+            # the keyboard on the second window change rather than the first.
+            self._listener_open = True
             if _remapping(replacement):
                 log.info("keyboard profile is active")
             else:
@@ -234,6 +274,68 @@ class Daemon:
         self._listener = replacement
         self._loaded_table = _listener_table(replacement)
         return True
+
+    def _start_window_watcher(self) -> None:
+        """Follow the focused window, if any profile asks to be chosen that way.
+
+        Asked for nothing but a single profile with no match, no script is loaded
+        into the compositor: there is nothing for it to decide, and a config the
+        user wrote once should not leave anything running in their session.
+        """
+        if not windowwatch_mod.wants_window(self.cfg.profiles):
+            return
+
+        watcher = windowwatch_mod.WindowWatcher()
+        if not watcher.start():
+            log.warning("cannot follow the focused window: %s", watcher.error)
+            log.warning("profiles keep using the first enabled one")
+            return
+
+        self._windows = watcher
+        self._window_profile = None
+        self._follow_window()
+
+    def _follow_window(self) -> None:
+        """Pick the profile for the window that has focus and apply it.
+
+        Nothing is done when the chosen profile is the one already in force.
+        Applying a profile grabs every keyboard, so a switch that lands on the
+        profile already loaded would interrupt typing for no visible reason.
+        """
+        watcher = self._windows
+        if watcher is None:
+            return
+        window = watcher.drain()
+        if window is None:
+            return
+
+        profile = windowprofile_mod.select(self.cfg.profiles, window)
+        if profile is None:
+            if self._window_profile is not None:
+                log.info("no profile claims that window, leaving keys alone")
+                self._window_profile = None
+                self._swap_profile(None)
+            return
+
+        name = getattr(profile, "name", "")
+        if name == self._window_profile:
+            return
+
+        try:
+            table = remap_for(profile)
+        except RemapError as exc:
+            log.error("profile %s cannot be applied: %s", name, exc)
+            return
+
+        if self._swap_profile(table):
+            self._window_profile = name
+            log.info("profile %s is active", name)
+
+    def _stop_window_watcher(self) -> None:
+        if self._windows is not None:
+            self._windows.stop()
+            self._windows = None
+            self._window_profile = None
 
     def _open_listener(self) -> None:
         """Open the current listener, falling back to plain listening if needed.
@@ -429,7 +531,7 @@ class Daemon:
             log.error("ignoring the keyboard profile: %s", exc)
             table = None
         self._remember_watched(devices)
-        self._listener = self._make_router(devices, code, panic, table or {})
+        self._listener = self._make_router(devices, code, panic, table)
         # Only claimed as loaded once the listener is actually open, which is
         # _open_listener's job; it clears this again if remapping turns out to be
         # impossible.
@@ -503,7 +605,11 @@ class Daemon:
         self._watched.update(paths)
 
     def _make_router(
-        self, devices: list[Path], code: int, panic: int | None, table: dict[int, int]
+        self,
+        devices: list[Path],
+        code: int,
+        panic: int | None,
+        table: dict[int, int] | None,
     ) -> HotkeyListener | KeyboardRouter:
         """Build the listener for a remap table. Opening it is the caller's job.
 
@@ -656,6 +762,7 @@ class Daemon:
         if not self.setup():
             return 1
         self.load_macros()
+        self._start_window_watcher()
         self._config_watcher = watcher_mod.config_watcher(
             self.cfg.path, self._reload_from_watcher
         )
@@ -684,6 +791,7 @@ class Daemon:
                 listener.poll(timeout=0.2)
                 self._expire_hold()
                 self._expire_stuck_hold()
+                self._follow_window()
                 if self._config_watcher is not None:
                     self._config_watcher.check()
         except KeyboardInterrupt:
@@ -697,6 +805,10 @@ class Daemon:
             # next run then collided with it on the source name
             if self._listener_open:
                 self._close_listener()
+            # Unloads the compositor script. A script left running outlives the
+            # daemon and keeps reporting to a bus name nobody owns, which makes
+            # the next start look broken.
+            self._stop_window_watcher()
             # Releases any key a macro was holding and closes the virtual
             # device. A macro interrupted by shutdown would otherwise leave a
             # key down for the rest of the session, and nothing in the log

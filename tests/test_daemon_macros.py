@@ -24,8 +24,10 @@ from src.periferia.core import config as config_mod
 from src.periferia.core import daemon as daemon_mod
 from src.periferia.core import keyboards as keyboards_mod
 from src.periferia.core import watcher as watcher_mod
+from src.periferia.core import windowwatch as windowwatch_mod
 from src.periferia.core.daemon import Daemon
 from src.periferia.core.macro import Step
+from src.periferia.modules.hotkey import resolve_key
 
 KEY_F5 = 63
 KEY_F6 = 64
@@ -93,8 +95,10 @@ class _FakeListener:
     """
 
     def __init__(self, devices, table, opened, closed):
+        # table of None is what "leave the keys alone" means to the daemon, so
+        # the fake has to accept it rather than dict() it.
         self.devices = list(devices)
-        self.table = dict(table)
+        self.table = dict(table or {})
         self.ptt_code = 41
         self.panic_code = 88
         self.remapping = bool(table)
@@ -134,6 +138,10 @@ def _make(
     d.macros = player or FakePlayer()  # type: ignore[assignment]
     d._macros_by_name = {}
     d._macro_codes = {}
+    d._loaded_table = None
+    d._listener_open = False
+    d._windows = None
+    d._window_profile = None
     d._latched = False
     d._release_at = None
     d._pressed_at = None
@@ -769,3 +777,319 @@ class TestRememberingKeyboardsAcrossBoots:
         assert json.loads(
             (tmp_path / "periferia" / "keyboards.json").read_text()
         )["keyboards"][0]["id"] == "phys:pci-0:14.0/input0"
+
+
+class TestFollowingTheFocusedWindow:
+    """Switching profiles on window change, with the compositor faked out.
+
+    A profile switch grabs every keyboard, so what matters here is not that it
+    happens but that it happens exactly once per switch.
+    """
+
+    def _daemon(self, monkeypatch, profiles):
+        d = _make(profiles=list(profiles))
+        d._listener_open = True
+        d._config_watcher = None
+        opened: list[str] = []
+        closed: list[str] = []
+        # Starts on the fallback profile, the way the daemon does, so a switch
+        # away from it and back to it are both real rebuilds.
+        d._loaded_table = _table(profiles[0].name)
+        d._window_profile = profiles[0].name
+        d._listener = _FakeListener([], d._loaded_table, opened, closed)
+        d._make_router = (  # type: ignore[method-assign]
+            lambda devices, code, panic, table: _FakeListener(devices, table, opened, closed)
+        )
+        d._windows = windowwatch_mod.WindowWatcher(clock=_StepClock())
+        return d, opened, closed
+
+    def _profiles(self):
+        return [
+            config_mod.ProfileConfig(name="default", remap={"KEY_CAPSLOCK": "KEY_ESC"}),
+            config_mod.ProfileConfig(
+                name="game",
+                match={"resource_class": "steam"},
+                remap={"KEY_CAPSLOCK": "KEY_TAB"},
+            ),
+        ]
+
+    def _focus_and_poll(self, d, resource_class):
+        """Put a window on the bus. The watcher holds it for SETTLE_S, so the
+        poll that applies it is separate from the one that sees it."""
+        d._windows._service = _OneShotService(
+            {"stage": "basics", "fields": {"resourceClass": resource_class}}
+        )
+        d._follow_window()
+
+    def test_switching_windows_switches_the_profile(self, monkeypatch):
+        d, opened, _ = self._daemon(monkeypatch, self._profiles())
+        self._focus_and_poll(d, "steam")
+
+        d._follow_window()
+
+        assert d._window_profile == "game"
+        assert d._loaded_table == _table("game")
+        assert len(opened) == 1
+
+    def test_the_same_window_twice_does_not_rebuild_the_keyboard(self, monkeypatch):
+        """Applying a profile grabs every keyboard. Doing it per report rather
+        than per switch makes alt-tab stutter."""
+        d, opened, _ = self._daemon(monkeypatch, self._profiles())
+        self._focus_and_poll(d, "steam")
+        d._follow_window()
+        assert len(opened) == 1
+
+        self._focus_and_poll(d, "steam")
+        d._follow_window()
+
+        assert len(opened) == 1
+        assert d._window_profile == "game"
+
+    def test_a_window_nothing_claims_goes_back_to_the_fallback(self, monkeypatch):
+        d, opened, _ = self._daemon(monkeypatch, self._profiles())
+        self._focus_and_poll(d, "steam")
+        d._follow_window()
+        assert d._window_profile == "game"
+
+        self._focus_and_poll(d, "konsole")
+        d._follow_window()
+
+        assert d._window_profile == "default"
+        assert d._loaded_table == _table("default")
+        assert len(opened) == 2
+
+    def test_a_profile_with_nothing_to_remap_leaves_the_keys_alone(self, monkeypatch):
+        """A profile that remaps no keys is not the same as one that remaps
+        them wrongly, and neither is a reason to refuse."""
+        profiles = [
+            config_mod.ProfileConfig(name="default"),
+            config_mod.ProfileConfig(name="plain", match={"resource_class": "konsole"}),
+        ]
+        d, _, _ = self._daemon(monkeypatch, profiles)
+        self._focus_and_poll(d, "konsole")
+
+        d._follow_window()
+
+        assert d._window_profile == "plain"
+        assert d._loaded_table is None
+
+    def test_a_broken_profile_does_not_change_what_is_loaded(self, monkeypatch):
+        """Half a table obeyed is keys quietly going back to normal, which looks
+        like a keyboard fault."""
+        profiles = self._profiles()
+        d, _, _ = self._daemon(monkeypatch, profiles)
+        self._focus_and_poll(d, "steam")
+        d._follow_window()
+        good = dict(d._loaded_table or {})
+
+        d.cfg.profiles[1].remap = {"KEY_CAPSLOCK": "NOT_A_KEY"}
+        self._focus_and_poll(d, "steam")
+        d._windows._service = _OneShotService(
+            {"stage": "basics", "fields": {"resourceClass": "steam"}}
+        )
+        d._follow_window()
+
+        # The same window, so nothing is rebuilt, and the bad table is not built.
+        assert d._loaded_table == good
+
+    def test_a_config_with_no_matching_profile_never_loads_a_script(self, monkeypatch):
+        d = _make(profiles=[config_mod.ProfileConfig(name="default")])
+        started: list[bool] = []
+        monkeypatch.setattr(
+            daemon_mod.windowwatch_mod,
+            "WindowWatcher",
+            lambda: _RefusingWatcher(started),
+        )
+
+        d._start_window_watcher()
+
+        assert started == []
+        assert d._windows is None
+
+    def test_a_watcher_that_cannot_start_leaves_the_daemon_alone(self, monkeypatch):
+        """Not working is reported once. It must not take push-to-talk with it."""
+        profiles = [
+            config_mod.ProfileConfig(name="default"),
+            config_mod.ProfileConfig(name="game", match={"resource_class": "steam"}),
+        ]
+        d, _, _ = self._daemon(monkeypatch, profiles)
+        d._windows = None
+        d._window_profile = None
+        d._windows = None
+        monkeypatch.setattr(
+            daemon_mod.windowwatch_mod,
+            "WindowWatcher",
+            lambda: _RefusingWatcher([], error="gdbus is not installed"),
+        )
+
+        d._start_window_watcher()
+
+        assert d._windows is None
+        assert d._window_profile is None
+
+    def test_the_script_is_unloaded_when_the_daemon_stops(self, monkeypatch):
+        """A script left loaded keeps reporting to a bus name nobody owns, which
+        makes the next start of the daemon look broken."""
+        d, _, _ = self._daemon(monkeypatch, self._profiles())
+        watcher = _RefusingWatcher([], start_ok=True)
+        d._windows = watcher
+
+        d._stop_window_watcher()
+
+        assert watcher.stopped == 1
+        assert d._windows is None
+        assert d._window_profile is None
+
+
+    def test_a_reload_that_names_a_window_starts_following_it(self, monkeypatch):
+        """Turning the feature on is a config edit, and asking for a restart to
+        do it would make the setting look broken."""
+        d, _, _ = self._daemon(monkeypatch, [config_mod.ProfileConfig(name="default")])
+        d._windows = None
+        started: list[bool] = []
+        monkeypatch.setattr(
+            daemon_mod.windowwatch_mod, "WindowWatcher", lambda: _CountingWatcher(started)
+        )
+        monkeypatch.setattr(
+            daemon_mod.config_mod,
+            "load",
+            lambda _path: config_mod.Config(
+                path="config.yaml",
+                profiles=[
+                    config_mod.ProfileConfig(name="default"),
+                    config_mod.ProfileConfig(name="game", match={"resource_class": "steam"}),
+                ],
+            ),
+        )
+        d.cfg.path = "config.yaml"
+
+        d.reload_config()
+
+        assert started == [True]
+        assert isinstance(d._windows, _CountingWatcher)
+
+    def test_a_reload_that_removes_the_last_match_stops_following(self, monkeypatch):
+        """A config left with a script loaded in the compositor is a thing the
+        user has to know to clean up by hand otherwise."""
+        profiles = [
+            config_mod.ProfileConfig(name="default"),
+            config_mod.ProfileConfig(name="game", match={"resource_class": "steam"}),
+        ]
+        d, _, _ = self._daemon(monkeypatch, profiles)
+        watcher = _CountingWatcher([])
+        d._windows = watcher
+        fresh = config_mod.Config(
+            path="config.yaml", profiles=[config_mod.ProfileConfig(name="default")]
+        )
+        monkeypatch.setattr(daemon_mod.config_mod, "load", lambda _path: fresh)
+        d.cfg.path = "config.yaml"
+
+        d.reload_config()
+
+        assert watcher.stopped == 1
+        assert d._windows is None
+
+    def test_a_reload_that_still_matches_does_not_restart_the_script(self, monkeypatch):
+        """Unloading and loading a script on every save would make editing a
+        macro fight with the compositor."""
+        profiles = [
+            config_mod.ProfileConfig(name="default"),
+            config_mod.ProfileConfig(name="game", match={"resource_class": "steam"}),
+        ]
+        d, _, _ = self._daemon(monkeypatch, profiles)
+        watcher = _CountingWatcher([])
+        d._windows = watcher
+        fresh = config_mod.Config(
+            path="config.yaml",
+            profiles=[
+                config_mod.ProfileConfig(name="default"),
+                config_mod.ProfileConfig(
+                    name="game",
+                    match={"resource_class": "steam"},
+                    remap={"KEY_CAPSLOCK": "KEY_TAB"},
+                ),
+            ],
+        )
+        monkeypatch.setattr(daemon_mod.config_mod, "load", lambda _path: fresh)
+        d.cfg.path = "config.yaml"
+
+        d.reload_config()
+
+        assert watcher.stopped == 0
+        assert d._windows is watcher
+
+
+class _CountingWatcher:
+    def __init__(self, starts):
+        self.starts = starts
+        self.stopped = 0
+        self._service = None
+
+    def start(self) -> bool:
+        self.starts.append(True)
+        return True
+
+    def stop(self) -> None:
+        self.stopped += 1
+
+    @property
+    def last(self):
+        return None
+
+    def drain(self):
+        return None
+
+
+def _table(profile_name: str) -> dict[int, int]:
+    caps = resolve_key("KEY_CAPSLOCK")
+    esc = resolve_key("KEY_ESC")
+    tab = resolve_key("KEY_TAB")
+    return {caps: esc if profile_name == "default" else tab}
+
+
+class _StepClock:
+    """Moves a second per reading, so the watcher's settle wait is one poll."""
+
+    def __init__(self) -> None:
+        self.now = 0.0
+
+    def __call__(self) -> float:
+        self.now += 1.0
+        return self.now
+
+
+class _OneShotService:
+    """A bus that has one message waiting and then nothing, like the real one."""
+
+    def __init__(self, report):
+        self.pending = [report]
+
+    def next_report(self, timeout: float):
+        return self.pending.pop(0) if self.pending else None
+
+    def stop(self) -> None:
+        pass
+
+
+class _RefusingWatcher:
+    def __init__(self, calls, *, start_ok: bool = False, error: str = ""):
+        self.started_calls = calls
+        self._ok = start_ok
+        self.error = error
+        self.started = False
+        self.stopped = 0
+
+    def start(self) -> bool:
+        self.started_calls.append(True)
+        self.started = self._ok
+        return self._ok
+
+    def stop(self) -> None:
+        self.stopped += 1
+
+    @property
+    def last(self):
+        return None
+
+    def drain(self):
+        return None

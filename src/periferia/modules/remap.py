@@ -121,12 +121,29 @@ def translate_events(
     return out
 
 
+def remap_for(profile: Any) -> dict[int, int] | None:
+    """Build the table for one named profile, or None if it remaps nothing.
+
+    Separate from active_remap() because selecting the profile is not the same
+    problem as building the table. The table is the same either way; only the
+    question of *which* profile changes once something can see the focused
+    window.
+
+    Raises RemapError on a table that cannot be applied, same as active_remap.
+    """
+    pairs = getattr(profile, "remap", None) or {}
+    if not pairs:
+        return None
+    return build_remap(pairs)
+
+
 def active_remap(profiles: Iterable[Any]) -> dict[int, int] | None:
     """Build the table for the profile in effect, or None to leave keys alone.
 
-    Only the first enabled profile is used. Selecting by focused window is the
-    part that needs a Wayland portal, and a list of profiles that silently
-    always means the first one is worse than a single profile named clearly.
+    Only the first enabled profile is used. Selecting by focused window is
+    handled above this, in windowprofile and the watcher that feeds it; this is
+    the fallback for a compositor that cannot say what has focus, and for a
+    profile that names no window.
 
     Raises RemapError on a table that cannot be applied. The caller decides
     whether that is fatal; a broken table should be reported, not obeyed.
@@ -134,10 +151,9 @@ def active_remap(profiles: Iterable[Any]) -> dict[int, int] | None:
     for entry in profiles:
         if not getattr(entry, "enabled", True):
             continue
-        pairs = getattr(entry, "remap", None) or {}
-        if not pairs:
-            continue
-        return build_remap(pairs)
+        table = remap_for(entry)
+        if table:
+            return table
     return None
 
 

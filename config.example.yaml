@@ -93,17 +93,26 @@ log:
   enabled: true
 
 # Keyboard profiles. A profile rewrites which physical key produces what.
-# Only the table and its validation exist so far: nothing grabs the keyboard
-# yet, so a profile changes nothing at runtime until that is switched on.
+# A profile with no `match` is the fallback and applies to everything. A profile
+# with one applies itself to the window you are in, on KWin only; elsewhere the
+# first enabled profile stays in force and the log says so.
+#
+# match takes resource_class, resource_name and caption, one value or a list of
+# them, and everything written has to match. The first profile that matches
+# wins, so the specific ones come first and the one without a match comes last.
+#
+#   profiles:
+#     - name: default
+#       remap: { KEY_CAPSLOCK: KEY_ESC }
+#     - name: game
+#       match: { resource_class: [steam, lutris, heroic] }
+#       remap:
+#         KEY_CAPSLOCK: KEY_TAB
+#         KEY_F1: KEY_F13
+#
 # Modifiers that stay held (shift, ctrl, alt, meta) are refused, because a
 # virtual device that emits a held modifier can leave it stuck down. Lock keys
 # are fine. Key names are physical, so "Й" is the key labelled Q in latin.
-#
-# profiles:
-#   - name: game
-#     remap:
-#       KEY_CAPSLOCK: KEY_ESC
-#       KEY_F1: KEY_F13
 
 # Macros: recorded keypresses replayed by one key. Purely a keyboard feature, it
 # has nothing to do with the microphone. Press `periferia macro check` after

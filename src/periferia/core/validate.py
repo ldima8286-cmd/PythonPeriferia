@@ -15,7 +15,7 @@ import dataclasses
 from collections.abc import Iterable, Sequence
 from typing import Any
 
-from . import windowprofile
+from . import kwinconfig, windowprofile
 
 ERROR = "error"
 WARNING = "warning"
@@ -218,6 +218,36 @@ def check_profiles(
                             f" so it cannot be pressed",
                         )
                     )
+
+    for index, profile in enumerate(profiles):
+        speed = getattr(getattr(profile, "pointer", None), "speed", None)
+        if speed is None:
+            continue
+        where = f"profile {getattr(profile, 'name', index)!r} pointer"
+        if isinstance(speed, bool) or not isinstance(speed, (int, float)):
+            found.append(
+                Problem(ERROR, where, f"speed is {speed!r}, which is not a number")
+            )
+        elif not kwinconfig.MIN_SPEED <= float(speed) <= kwinconfig.MAX_SPEED:
+            found.append(
+                Problem(
+                    ERROR,
+                    where,
+                    f"speed {speed} is outside what a pointer can use; it has to be"
+                    f" between {kwinconfig.MIN_SPEED} and {kwinconfig.MAX_SPEED},"
+                    f" where {kwinconfig.NEUTRAL} is the speed the mouse was built with",
+                )
+            )
+        elif not kwinconfig.available():
+            found.append(
+                Problem(
+                    WARNING,
+                    where,
+                    "sets the pointer speed, which only KWin can apply here, and the"
+                    " tools that write its configuration are not installed"
+                    " (package kde-config-tools)",
+                )
+            )
 
     if profiles and all(not (getattr(p, "match", None) or {}) for p in profiles):
         found.append(

@@ -91,7 +91,25 @@ class ProfileConfig:
     enabled: bool = True
     match: dict[str, str | list[str]] = dataclasses.field(default_factory=dict)
     remap: dict[str, str] = dataclasses.field(default_factory=dict)
+    pointer: PointerConfig | None = None
     macros: list[MacroConfig] = dataclasses.field(default_factory=list)
+
+
+@dataclasses.dataclass(slots=True)
+class PointerConfig:
+    """How fast the mouse pointer moves while this profile applies.
+
+    `speed` is the same number the desktop settings show as pointer speed, where
+    1.0 is what the hardware was built with. It is not DPI: the DPI a mouse
+    reports is a property of the mouse, and only software can pretend otherwise
+    by scaling the pointer.
+
+    The pointer is not the keyboard, so this does not travel through uinput. It
+    is written into the compositor's own configuration file, which means it is
+    the compositor that applies it and only a compositor that can be asked will.
+    """
+
+    speed: float | None = None
 
 
 @dataclasses.dataclass(slots=True)
@@ -220,6 +238,12 @@ def _build_profiles(data: Any) -> list[ProfileConfig]:
             raise ValueError(f"profiles[{index}]: {exc}") from None
         if isinstance(item, dict):
             out[-1].macros = _build_macros(item.get("macros"), f"profiles[{index}].macros")
+            pointer = item.get("pointer")
+            if pointer is not None:
+                try:
+                    out[-1].pointer = _build(PointerConfig, pointer)
+                except ValueError as exc:
+                    raise ValueError(f"profiles[{index}].pointer: {exc}") from None
     return out
 
 

@@ -13,8 +13,10 @@ from collections.abc import Callable, Iterable
 from functools import partial
 from pathlib import Path
 from types import FrameType
+from typing import Any
 
 from ..core import keyboards as keyboards_mod
+from ..core import kwinconfig as kwinconfig_mod
 from ..core import pipewire as pipewire_mod
 from ..core import windowprofile as windowprofile_mod
 from ..core import windowwatch as windowwatch_mod
@@ -47,6 +49,11 @@ def _remapping(listener: HotkeyListener | KeyboardRouter) -> bool:
     not which class it happens to be.
     """
     return bool(getattr(listener, "remapping", False))
+
+
+def _wants_pointer(profiles: Iterable[Any]) -> bool:
+    """Whether any profile in the config asks for a pointer speed at all."""
+    return any(getattr(getattr(p, "pointer", None), "speed", None) is not None for p in profiles)
 
 
 def _log_disabled(table: dict[int, int | None] | None) -> None:
@@ -106,6 +113,10 @@ class Daemon:
         # of the one in force, so a switch does not rebuild what is already up.
         self._windows: windowwatch_mod.WindowWatcher | None = None
         self._window_profile: str | None = None
+        # The pointer speed KWin had before this daemon touched it, so a config
+        # that only moves the pointer in one window can put it back.
+        self._pointer_was: float | None = None
+        self._pointer_now: float | None = None
         # Watches the config file, so a finished macro recording goes live
         # without restarting the daemon.
         self._config_watcher: watcher_mod.ConfigWatcher | None = None
@@ -344,7 +355,47 @@ class Daemon:
 
         if self._swap_profile(table):
             self._window_profile = name
+            self._apply_pointer(profile)
             log.info("profile %s is active", name)
+
+    def _apply_pointer(self, profile: Any) -> None:
+        """Give the compositor the pointer speed this profile asks for.
+
+        Only touches kwinrc when some profile actually asks for a speed. A
+        config that never mentions the pointer leaves the desktop settings
+        entirely alone, because a program that rewrites them on every start is a
+        program nobody trusts with them.
+
+        The first value seen is remembered before it is overwritten, which is
+        what makes leaving the window put the pointer back.
+        """
+        if not _wants_pointer(self.cfg.profiles):
+            return
+
+        speed = getattr(getattr(profile, "pointer", None), "speed", None)
+        if speed == self._pointer_now:
+            return
+        if self._pointer_was is None:
+            self._pointer_was = kwinconfig_mod.read_speed()
+            log.info("pointer speed before any profile: %s", self._pointer_was)
+
+        if kwinconfig_mod.apply(speed, self._pointer_was):
+            self._pointer_now = speed
+            if speed is None:
+                log.info("pointer speed is back to what the session had")
+            else:
+                log.info("pointer speed is now %g", speed)
+        else:
+            log.warning("the pointer speed in profile %s could not be set",
+                        getattr(profile, "name", "?"))
+
+    def _restore_pointer(self) -> None:
+        """Put the pointer speed the session had, if this daemon changed it."""
+        if self._pointer_now is None or self._pointer_was is None:
+            return
+        if kwinconfig_mod.apply(self._pointer_was, self._pointer_was):
+            log.info("pointer speed is back to %g", self._pointer_was)
+        self._pointer_now = None
 
     def _stop_window_watcher(self) -> None:
         if self._windows is not None:
@@ -786,6 +837,9 @@ class Daemon:
             log.info("watching %s for changes", self.cfg.path)
 
         self._listener_open = False
+        # A profile with no window of its own still sets the pointer, so it is
+        # applied here rather than only when a window change arrives.
+        self._apply_pointer(windowprofile_mod.fallback(self.cfg.profiles))
 
         try:
             try:
@@ -825,6 +879,10 @@ class Daemon:
             # daemon and keeps reporting to a bus name nobody owns, which makes
             # the next start look broken.
             self._stop_window_watcher()
+            # Puts the pointer speed back. A daemon that leaves the pointer at a
+            # game's speed after it exits has changed the desktop in a way
+            # nothing will ever mention.
+            self._restore_pointer()
             # Releases any key a macro was holding and closes the virtual
             # device. A macro interrupted by shutdown would otherwise leave a
             # key down for the rest of the session, and nothing in the log

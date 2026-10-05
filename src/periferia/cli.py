@@ -424,6 +424,9 @@ def cmd_profiles(args: argparse.Namespace) -> int:
         killed = [str(k) for k, v in (profile.remap or {}).items() if _is_off(v)]
         suffix = f" {DIM}{keys} keys" + (f", {len(killed)} off{RESET}" if killed else "")
         names = f" {DIM}({' '.join(killed)}){RESET}" if killed else ""
+        speed = getattr(getattr(profile, "pointer", None), "speed", None)
+        if speed is not None:
+            suffix += f", pointer {speed:g}x"
         print(f"  {profile.name:16} {match}{off} {suffix}{names}")
     return _print_report(report)
 

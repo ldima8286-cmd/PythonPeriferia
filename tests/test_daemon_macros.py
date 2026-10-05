@@ -142,6 +142,8 @@ def _make(
     d._listener_open = False
     d._windows = None
     d._window_profile = None
+    d._pointer_was = None
+    d._pointer_now = None
     d._latched = False
     d._release_at = None
     d._pressed_at = None
@@ -1122,3 +1124,132 @@ def test_a_table_with_nothing_disabled_says_nothing(caplog) -> None:
         _log_disabled(None)
 
     assert not [r for r in caplog.records if "turned off" in r.getMessage()]
+
+
+class TestThePointerSpeed:
+    """A profile can ask for a different pointer speed.
+
+    Pointer speed is the compositor's setting rather than the keyboard's, so
+    none of this touches uinput and a session that cannot be asked still works.
+    """
+
+    def _daemon(self, profiles):
+        d = _make(profiles=list(profiles))
+        d.cfg = config_mod.Config(path="config.yaml", profiles=list(profiles))
+        d._pointer_was = None
+        d._pointer_now = None
+        d._listener_open = True
+        d._config_watcher = None
+        d._windows = windowwatch_mod.WindowWatcher(clock=lambda: 1.0)
+        d._listener = _FakeListener([], {}, [], [])
+        d._make_router = (  # type: ignore[method-assign]
+            lambda devices, code, panic, table: _FakeListener(devices, table, [], [])
+        )
+        return d
+
+    def _profiles(self, speed=0.4):
+        return [
+            config_mod.ProfileConfig(name="default"),
+            config_mod.ProfileConfig(
+                name="game",
+                match={"resource_class": "steam"},
+                pointer=config_mod.PointerConfig(speed=speed),
+            ),
+        ]
+
+    def _fake_kwin(self, monkeypatch, before=1.0):
+        written: list[float] = []
+        applied: list[tuple[object, object]] = []
+        monkeypatch.setattr(
+            daemon_mod.kwinconfig_mod, "read_speed", lambda: before, raising=True
+        )
+        monkeypatch.setattr(
+            daemon_mod.kwinconfig_mod,
+            "apply",
+            lambda speed, restore: applied.append((speed, restore)) or True,
+        )
+        return written, applied
+
+    def test_a_config_with_no_pointer_is_left_alone(self, monkeypatch):
+        """Rewriting desktop settings for a config that never mentioned the
+        pointer is how a program stops being trusted with them."""
+        d = self._daemon([config_mod.ProfileConfig(name="default")])
+        _written, applied = self._fake_kwin(monkeypatch)
+
+        d._apply_pointer(config_mod.ProfileConfig(name="default"))
+
+        assert applied == []
+
+    def test_the_speed_reaches_the_compositor(self, monkeypatch):
+        d = self._daemon(self._profiles())
+        _written, applied = self._fake_kwin(monkeypatch)
+
+        d._apply_pointer(d.cfg.profiles[1])
+
+        assert applied == [(0.4, 1.0)]
+
+    def test_the_original_is_read_before_the_first_change(self, monkeypatch):
+        """Reading it afterwards would read back what this daemon wrote, and the
+        pointer could then never be put back."""
+        d = self._daemon(self._profiles())
+        _written, applied = self._fake_kwin(monkeypatch, before=0.8)
+
+        d._apply_pointer(d.cfg.profiles[1])
+
+        assert applied == [(0.4, 0.8)]
+
+    def test_leaving_the_window_puts_the_pointer_back(self, monkeypatch):
+        d = self._daemon(self._profiles())
+        _written, applied = self._fake_kwin(monkeypatch)
+        d._apply_pointer(d.cfg.profiles[1])
+        d._pointer_now = 0.4
+
+        d._apply_pointer(config_mod.ProfileConfig(name="default"))
+
+        assert applied[-1] == (None, 1.0)
+        assert d._pointer_now is None
+
+    def test_the_same_speed_is_not_written_twice(self, monkeypatch):
+        """The watcher asks on every pass of the loop, and a write on each one
+        would be a write to kwinrc several times a second."""
+        d = self._daemon(self._profiles())
+        _written, applied = self._fake_kwin(monkeypatch)
+
+        d._apply_pointer(d.cfg.profiles[1])
+        d._apply_pointer(d.cfg.profiles[1])
+        d._apply_pointer(d.cfg.profiles[1])
+
+        assert len(applied) == 1
+
+    def test_a_compositor_that_cannot_be_written_is_not_fatal(self, monkeypatch):
+        """Push to talk matters more than pointer speed."""
+        d = self._daemon(self._profiles())
+        _written, _applied = self._fake_kwin(monkeypatch)
+        monkeypatch.setattr(daemon_mod.kwinconfig_mod, "apply", lambda speed, restore: False)
+
+        d._apply_pointer(d.cfg.profiles[1])
+
+        assert d._pointer_now is None
+
+    def test_shutdown_puts_the_pointer_back(self, monkeypatch):
+        """A daemon that leaves the pointer at a game's speed after it exits has
+        changed the desktop in a way nothing will ever mention."""
+        d = self._daemon(self._profiles())
+        _written, applied = self._fake_kwin(monkeypatch)
+        d._pointer_was = 1.0
+        d._pointer_now = 0.4
+
+        d._restore_pointer()
+
+        assert applied == [(1.0, 1.0)]
+        assert d._pointer_now is None
+
+    def test_a_daemon_that_never_touched_the_pointer_does_not(self, monkeypatch):
+        d = self._daemon([config_mod.ProfileConfig(name="default")])
+        _written, applied = self._fake_kwin(monkeypatch)
+        d._pointer_was = None
+        d._pointer_now = None
+
+        d._restore_pointer()
+
+        assert applied == []

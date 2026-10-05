@@ -264,6 +264,31 @@ list of them, and every field written has to match. The first profile that
 matches wins, so put the specific ones first and leave one without a `match` at
 the end as the fallback.
 
+### Pointer speed
+
+`pointer.speed` scales the mouse pointer while a profile applies. It is not
+DPI: DPI belongs to the mouse, and software can only scale the pointer the
+desktop draws.
+
+```yaml
+  - name: game
+    match: { resource_class: steam }
+    pointer: { speed: 2.5 }
+    remap: { KEY_CAPSLOCK: KEY_TAB }
+```
+
+`1.0` is the speed the mouse was built with, and the range is `0.05` to `10`.
+`periferia profiles` prints it.
+
+The pointer is not the keyboard, so this does not go through `/dev/uinput`: it
+goes into the compositor's own `kwinrc`, and KWin is asked to reread it. Only
+KWin can be asked that way. Without `kde-config-tools` installed, the profile
+still applies to the keys and the log says the pointer was left alone.
+
+The speed the session had before is put back when a profile without a
+`pointer` applies, and again when the daemon exits. A config that never mentions
+`pointer` does not touch the file at all.
+
 ### Turning a key off
 
 `none` as a target means the key does not exist while the profile applies:
@@ -590,9 +615,8 @@ reports on this.
 
 - [ ] stereo to mono, if it turns out the two channels really differ
 - [ ] GUI for the config
-- [ ] input profiles: pointer speed per profile. The keyboard side is done,
-      including turning a key off entirely, and on KWin the profile follows the
-      focused window
+- [x] input profiles: remap, turn a key off entirely, pointer speed per
+      profile, and on KWin the profile follows the focused window
 - [ ] RGB control with scripts and time-of-day profiles. Needs raw HID access,
       which this machine does not expose
 - [ ] compressor and de-esser. Not going to happen here: filter-chain will not

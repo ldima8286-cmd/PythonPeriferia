@@ -30,6 +30,7 @@ src/periferia/
     activewindow.py      the compositor, where it can be asked
     windowbus.py         the bus name a compositor script reports to
     windowwatch.py       the loaded KWin script, polled and settled
+    kwinconfig.py        the pointer speed, written where KWin reads it
     validate.py          what will not work, and why
     daemon.py            wiring and lifecycle
   modules/

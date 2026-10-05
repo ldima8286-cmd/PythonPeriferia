@@ -97,6 +97,11 @@ log:
 # with one applies itself to the window you are in, on KWin only; elsewhere the
 # first enabled profile stays in force and the log says so.
 #
+# `pointer` scales the mouse pointer, which is the desktop's setting rather than
+# the keyboard's: 1.0 is the speed the mouse was built with, 0.05 to 10 is the
+# range. It is written into kwinrc, so it needs KWin and kde-config-tools. The
+# speed the session had is put back when a profile without one applies.
+#
 # match takes resource_class, resource_name and caption, one value or a list of
 # them, and everything written has to match. The first profile that matches
 # wins, so the specific ones come first and the one without a match comes last.
@@ -106,6 +111,7 @@ log:
 #       remap: { KEY_CAPSLOCK: KEY_ESC }
 #     - name: game
 #       match: { resource_class: [steam, lutris, heroic] }
+#       pointer: { speed: 2.5 }
 #       remap:
 #         KEY_CAPSLOCK: none      # gone in this window
 #         KEY_F1: KEY_TAB

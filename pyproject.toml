@@ -37,6 +37,7 @@ periferia = "periferia.cli:main"
 periferia-daemon = "periferia.core.daemon:main"
 periferia-check = "periferia.core.envcheck:main"
 periferia-gui = "periferia.gui.window:main"
+periferia-tray = "periferia.gui.tray:main"
 
 [project.urls]
 Repository = "https://github.com/ldima8286-cmd/PythonPeriferia"

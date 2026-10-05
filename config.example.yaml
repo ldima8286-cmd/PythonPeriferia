@@ -104,12 +104,6 @@ log:
 #     remap:
 #       KEY_CAPSLOCK: KEY_ESC
 #       KEY_F1: KEY_F13
-  #
-  # profiles:
-  #   - name: game
-  #     remap:
-  #       KEY_CAPSLOCK: KEY_ESC
-  #       KEY_F1: KEY_F13
 
 # Macros: recorded keypresses replayed by one key. Purely a keyboard feature, it
 # has nothing to do with the microphone. Press `periferia macro check` after

@@ -29,9 +29,9 @@ than any one application.
 The daemon watches the config file, so a finished macro recording or an edited
 keyboard profile is picked up within about a second. See "Macros".
 
-  Not built yet: tray icon, RGB. The input profiles are configurable and
-  validated, but nothing follows the focused window yet, so a profile only
-  takes effect as the first enabled one. See "Roadmap".
+  Not built yet: RGB. The input profiles are configurable and validated, but
+  nothing follows the focused window yet, so a profile only takes effect as the
+  first enabled one. See "Roadmap".
 
 ### Knowing whether the microphone is open
 
@@ -45,14 +45,13 @@ daemon pid    1234
 ```
 
 The daemon writes this to `$XDG_RUNTIME_DIR/periferia/state.json` whenever the
-microphone changes, which is where any future tray icon would read it too. It
-is runtime state, not a setting, so it lives in the runtime directory and is
-meaningless the moment the daemon is gone.
+microphone changes. It is runtime state, not a setting, so it lives in the
+runtime directory and is meaningless the moment the daemon is gone.
 
-There is deliberately no tray icon yet. A Qt tray is roughly 80 MB of
-dependencies for one dot in the corner, and the only thing it would show is
-what `periferia status` already prints. If a real indicator is wanted later,
-this file is the interface to build it on.
+The tray reads that same file, which is why it needs no connection to the
+daemon and shows nothing at all when the daemon is not running. A dot in the
+corner for one number is a lot of Qt to ship, but the alternative is a keyboard
+shortcut nobody remembers; both are one process reading a file.
 
 ## Install
 
@@ -247,6 +246,26 @@ Four things, in the order they get asked for:
 
 The last page is the same checks `periferia profiles` runs, so a config can be
 inspected without starting anything.
+
+## The indicator
+
+One dot, three colours, no configuration. It reads the state file, so it can be
+run at any time and does not care whether the daemon is running:
+
+```
+periferia-tray              # tray icon, menu on click
+periferia-tray --overlay    # the same dot painted on the desktop instead
+periferia-tray --window     # the Qt window, for a session with no tray
+```
+
+Green means the microphone is open, grey means closed, amber means it is blocked
+by a device still in use by something else. Nothing is shown when the daemon is
+not running, which is the case that matters: an indicator that looks fine while
+the daemon is dead is worse than no indicator.
+
+`--overlay` draws it on the desktop, near the top right, click-through, and it
+does not appear in the taskbar. That is for tiling setups where a tray exists
+but nothing ever looks at it.
 
 ## Macros
 
@@ -514,7 +533,6 @@ reports on this.
 
 ## Roadmap
 
-- [ ] tray icon and overlay indicator, reading the state file `periferia status` uses
 - [ ] stereo to mono, if it turns out the two channels really differ
 - [ ] GUI for the config
 - [ ] input profiles: DPI, disable keys, and switching by active window. The

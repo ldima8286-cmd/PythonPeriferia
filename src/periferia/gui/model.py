@@ -243,6 +243,19 @@ def save_profiles(path: Path, rows: Sequence[Row], name: str) -> None:
         path.write_text(pyyaml.safe_dump(data, sort_keys=False), encoding="utf-8")
 
 
+# One colour per state, shared by the tray, the overlay and the window, so the
+# three can never drift apart and leave the tray green while the window says the
+# microphone is closed.
+STATE_COLOURS = {
+    state_mod.OPEN: "#2e7d32",
+    state_mod.CLOSING: "#9a6700",
+    state_mod.LATCHED: "#b26a00",
+    state_mod.PANIC: "#b3261e",
+    state_mod.CLOSED: "#5f6368",
+    "unknown": "#5f6368",
+}
+
+
 @dataclasses.dataclass(frozen=True, slots=True)
 class MicStatus:
     state: str = "unknown"
@@ -260,6 +273,12 @@ class MicStatus:
     @property
     def latched(self) -> bool:
         return self.state == state_mod.LATCHED
+
+    @property
+    def colour(self) -> str:
+        if not self.running:
+            return STATE_COLOURS["unknown"]
+        return STATE_COLOURS.get(self.state, STATE_COLOURS["unknown"])
 
     @property
     def text(self) -> str:
@@ -294,6 +313,42 @@ class MicStatus:
             ).text
             detail += f"   Последнее: {last.lower()}"
         return detail
+
+
+@dataclasses.dataclass
+class TrayLook:
+    """How the tray icon should look for one status.
+
+    Kept apart from the icon itself so it can be decided without a display.
+    What colour a state gets is a rule the user reads, not a drawing detail.
+    """
+
+    colour: str
+    text: str
+    # Latched is the state nobody can hear: the key was released and the mic is
+    # still open. It has to be told apart from open, not shown as another shade
+    # of green.
+    attention: bool = False
+
+
+def tray_look(status: MicStatus) -> TrayLook:
+    """The colour and wording for a status.
+
+    The daemon is not running is deliberately the same grey as closed, with the
+    wording doing the work. A red tray for a daemon that is simply not started
+    would cry wolf every time the machine boots.
+    """
+    if not status.running:
+        return TrayLook(STATE_COLOURS["unknown"], "Periferia: демон не запущен")
+    if status.state == state_mod.OPEN:
+        return TrayLook(STATE_COLOURS[state_mod.OPEN], "Periferia: микрофон открыт")
+    if status.state == state_mod.CLOSING:
+        return TrayLook(STATE_COLOURS[state_mod.CLOSING], "Periferia: микрофон закрывается")
+    if status.state == state_mod.LATCHED:
+        return TrayLook(STATE_COLOURS[state_mod.LATCHED], "Periferia: микрофон залип", True)
+    if status.state == state_mod.PANIC:
+        return TrayLook(STATE_COLOURS[state_mod.PANIC], "Periferia: паника", True)
+    return TrayLook(STATE_COLOURS[state_mod.CLOSED], "Periferia: микрофон закрыт")
 
 
 def read_status() -> MicStatus:

@@ -45,16 +45,6 @@ log = logging.getLogger("periferia.gui")
 
 POLL_MS = 200
 
-STATE_COLOURS = {
-    "OPEN": "#2e7d32",
-    "CLOSING": "#9a6700",
-    "LATCHED": "#b26a00",
-    "PANIC": "#b3261e",
-    "CLOSED": "#5f6368",
-    "unknown": "#5f6368",
-}
-
-
 class RemapEditor(QWidget):
     """From key, to key, and a table of them."""
 

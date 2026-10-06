@@ -230,11 +230,48 @@ def check_flatpak_sound() -> Result:
     )
 
 
+def check_graph() -> Result:
+    """Whether the graph can be read directly from pw-dump.
+
+    Only cleanup reads it, and there is a pactl answer behind it, so a missing
+    pw-dump costs a slower cleanup rather than a broken microphone. Warn so
+    the trade is visible without failing the check.
+    """
+    if not pipewire.have_graph():
+        return Result(
+            "graph",
+            WARN,
+            "pw-dump not found",
+            "cleanup falls back to pactl, install pipewire-utils",
+        )
+    try:
+        graph = pipewire.dump(timeout=5.0)
+    except pipewire.PipeWireError as exc:
+        return Result(
+            "graph",
+            WARN,
+            str(exc),
+            "cleanup falls back to pactl",
+        )
+    duplicates = graph.duplicates()
+    detail = f"{len(graph.nodes)} nodes, {len(graph.links)} links"
+    if duplicates:
+        names = ", ".join(sorted(duplicates))
+        return Result(
+            "graph",
+            WARN,
+            f"{detail}; {len(duplicates)} duplicated name(s): {names}",
+            "more than one node answers to a name, unload the stale module",
+        )
+    return Result("graph", OK, detail)
+
+
 def run_all() -> list[Result]:
     results: list[Result] = []
     results.append(check_wayland())
     results.extend(check_binaries())
     results.append(check_pipewire())
+    results.append(check_graph())
     results.extend(check_sources())
     results.extend(check_input_access())
     results.append(check_uinput())

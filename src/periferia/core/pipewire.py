@@ -1,10 +1,15 @@
-"""Thin wrapper over pactl.
+"""Thin wrapper over pactl and pw-dump.
 
 Every PipeWire call in the project goes through here, so the rest of the code
 never shells out on its own and every call is easy to fake in tests.
 
 The list commands are parsed as JSON. pactl's human readable output is
 translated, so parsing its labels breaks on a non English locale.
+
+pactl answers questions about sources and modules in PulseAudio's vocabulary.
+`dump` reads the graph itself instead: nodes, ports, links and the pulse
+module id each node was created by, which is what `stale_modules` needs and
+what a module list never carries.
 """
 
 from __future__ import annotations
@@ -17,10 +22,13 @@ import time
 from collections.abc import Sequence
 from typing import Any
 
+from . import graph as graph_mod
+
 log = logging.getLogger(__name__)
 
 PACTL = "pactl"
 PW_CLI = "pw-cli"
+PW_DUMP = "pw-dump"
 
 PA_PERCENT = 65536
 NO_MODULE = 4294967295
@@ -70,6 +78,26 @@ def _json(args: Sequence[str]) -> Any:
         return json.loads(out)
     except json.JSONDecodeError as exc:
         raise PipeWireError(f"{' '.join(args)} returned invalid json: {exc}") from exc
+
+
+def have_graph() -> bool:
+    """Whether pw-dump is installed at all."""
+    return have(PW_DUMP)
+
+
+def dump(timeout: float = 5.0) -> graph_mod.Graph:
+    """Read the whole graph straight from PipeWire.
+
+    pw-dump occasionally prints arrays with no key, which is not JSON; the
+    parser names them rather than failing the whole read.
+    """
+    if not have_graph():
+        raise PipeWireError(f"{PW_DUMP} not found")
+    proc = run([PW_DUMP], timeout=timeout)
+    try:
+        return graph_mod.parse(proc.stdout)
+    except graph_mod.GraphError as exc:
+        raise PipeWireError(f"{PW_DUMP} -> {exc}") from exc
 
 
 def sources() -> list[dict[str, Any]]:
@@ -199,18 +227,24 @@ def source_by_module(module_id: int) -> str | None:
     return None
 
 
-def stale_modules(module_name: str, description: str) -> list[int]:
-    """Ids of leftover modules of ours that are still loaded.
+def graph_module_ids(description: str) -> list[int] | None:
+    """Pulse module ids of the graph nodes carrying `description`.
 
-    A killed run leaves the module up, PipeWire names the new source the same
-    way, and two nodes then answer to one name. pactl resolves a name to
-    whichever comes first, so the gate would drive one source while the self
-    check read the other, and the level would sit frozen no matter what key was
-    pressed. Matching on the description we asked for keeps this portable: the
-    source name itself is not the same on every machine.
+    None when the graph cannot be read, which is the caller's cue to fall back
+    to pactl. The id comes from the node itself, so nothing has to be matched
+    back against a module list that carries no ids at all.
     """
-    if not description:
-        return []
+    if not description or not have_graph():
+        return None
+    try:
+        return dump().module_ids_for(description)
+    except PipeWireError as exc:
+        log.debug("graph unavailable: %s", exc)
+        return None
+
+
+def _stale_ids_from_sources(description: str) -> list[int]:
+    """The same answer read through pactl, for when there is no graph."""
     owners: set[int] = set()
     for item in sources():
         props = item.get("properties") or {}
@@ -220,6 +254,29 @@ def stale_modules(module_name: str, description: str) -> list[int]:
         owner = item.get("owner_module", NO_MODULE)
         if named and owner != NO_MODULE:
             owners.add(owner)
+    return sorted(owners)
+
+
+def stale_modules(module_name: str, description: str) -> list[int]:
+    """Ids of leftover modules of ours that are still loaded.
+
+    A killed run leaves the module up, PipeWire names the new source the same
+    way, and two nodes then answer to one name. pactl resolves a name to
+    whichever comes first, so the gate would drive one source while the self
+    check read the other, and the level would sit frozen no matter what key was
+    pressed. Matching on the description we asked for keeps this portable: the
+    source name itself is not the same on every machine.
+
+    The graph answers this directly: a node carries the description we asked
+    for and the pulse module id it was created by. pactl is only consulted for
+    the ids when the graph is not readable, and either way the module is
+    confirmed to be ours before anything is unloaded.
+    """
+    if not description:
+        return []
+    owners = graph_module_ids(description)
+    if owners is None:
+        owners = _stale_ids_from_sources(description)
     if not owners:
         return []
     # "pactl list short modules" reports only name and argument, never an id,
@@ -230,7 +287,7 @@ def stale_modules(module_name: str, description: str) -> list[int]:
         item.get("name") == module_name and description in (item.get("argument") or "")
         for item in modules()
     )
-    return sorted(owners) if ours else []
+    return sorted(set(owners)) if ours else []
 
 
 def unload_stale(module_name: str, description: str) -> list[int]:

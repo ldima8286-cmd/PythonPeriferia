@@ -19,7 +19,8 @@ src/periferia/
   tui.py                 terminal window
   core/
     config.py            dataclasses, yaml loading, validation
-    pipewire.py          every pactl / wp-cli call in the project
+    pipewire.py          every pactl / pw-dump call in the project
+    graph.py             parses pw-dump: nodes, ports, links, module ids
     logging_setup.py
     envcheck.py          "can this machine run it"
     state.py             the state file `periferia status` reads
@@ -78,9 +79,14 @@ key release -> wait hold_ms -> ramp down over release_ms
 panic       -> volume 0 immediately, hold_ms skipped
 ```
 
-The ramp is stepped every 5 ms along a curve, because a step change in volume
-clicks. `exp` reaches useful loudness fastest in perceived terms, which is why
-it is the default even though `linear` is easier to reason about.
+The ramp is stepped along a curve, because a step change in volume clicks.
+Progress comes from the clock, not from a step counter: one write against
+`pactl` costs a fork and a round trip, well over the 5 ms the ramp would like
+to allow, so counting writes stretched a 200 ms attack into most of a second
+and the mic was heard opening late. A write that overruns a tick skips it
+rather than catching up, and the last value written is the target exactly.
+`exp` reaches useful loudness fastest in perceived terms, which is why it is
+the default even though `linear` is easier to reason about.
 
 If the device is grabbed, or the sound server restarts, the ramp thread
 catches the error and logs it rather than dying.
@@ -102,6 +108,30 @@ gives about 5 ms, which is a much bigger win than anything in this codebase.
 
 This is why the audio side of the project is thin on purpose. The work worth
 doing here is correctness, not speed.
+
+## Reading the graph
+
+A killed run leaves its `module-echo-cancel` loaded, and the next run then has
+two nodes answering to one name. `pactl` resolves a name to whichever comes
+first, so the gate drives one source while the self check reads the other and
+the level sits frozen.
+
+`pw-dump` answers this directly. A node carries the description we asked for
+and the `pulse.module.id` it was created by, so cleanup reads the id off the
+node instead of matching it back against a module list -- `pactl list short
+modules` has no id field at all, which is why this used to find nothing. The
+module is still confirmed to be ours through its argument before anything is
+unloaded, so a description that happens to match someone else's module cannot
+get it torn down.
+
+`pw-dump` occasionally prints an array with no key inside a `params` map,
+which is not valid JSON. `core/graph.py` names those arrays and parses the
+rest; when the read cannot be salvaged, or `pw-dump` is not installed, the
+caller gets `None` and falls back to the pactl path. Nothing outside
+`pipewire.py` runs a subprocess, so `graph.py` is a pure parser.
+
+Writes still go through `pactl`. Loading a module is its job, it is the
+supported way to do it, and the graph is read-only here.
 
 ## What is not in here
 

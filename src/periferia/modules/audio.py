@@ -33,6 +33,10 @@ log = logging.getLogger(__name__)
 
 Slider = Callable[[str, float], None]
 
+# Nominal spacing of the ramp's writes. The ramp follows the clock, so this
+# only decides how often it looks; a write slower than this simply skips ticks.
+TICK = 0.005
+
 
 def _shape(t: float, curve: str) -> float:
     """t is 0..1 progress, returns the gain for that step."""
@@ -187,30 +191,38 @@ class VirtualMic:
                 return
 
             start = self._volume
-            steps = max(2, int(duration_ms / 5))
-            interval = duration_ms / 1000.0 / steps
+            duration = duration_ms / 1000.0
             curve = self.cfg.curve
             cancelled = threading.Event()
             self._ramp_cancel = cancelled
 
             def worker() -> None:
                 started = time.monotonic()
-                for step in range(1, steps + 1):
-                    if cancelled.is_set():
-                        return
-                    progress = min(1.0, (step / steps))
+                deadline = started + duration
+                step = 1
+                while True:
+                    now = time.monotonic()
+                    if now >= deadline:
+                        break
+                    # Progress comes from the clock, not from a step counter:
+                    # one write against pactl costs far more than a tick, and
+                    # counting writes stretched a 200 ms attack into most of a
+                    # second. An overdue tick is skipped, never caught up.
+                    progress = (now - started) / duration
                     value = start + (target - start) * _shape(progress, curve)
                     with self._lock:
                         if cancelled.is_set():
                             return
                         self._apply(value)
-                    remaining = started + interval * step - time.monotonic()
-                    if remaining > 0 and cancelled.wait(remaining):
+                    while started + step * TICK <= time.monotonic():
+                        step += 1
+                    wait = min(started + step * TICK, deadline) - time.monotonic()
+                    if wait > 0 and cancelled.wait(wait):
                         return
                 with self._lock:
                     if cancelled.is_set():
                         return
-                    self._volume = target
+                    self._apply(target)
                     self._ramp_cancel = None
 
             self._ramp_thread = threading.Thread(target=worker, name="periferia-ramp", daemon=True)

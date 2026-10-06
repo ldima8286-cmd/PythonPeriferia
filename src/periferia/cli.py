@@ -535,6 +535,42 @@ def cmd_list_sources(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_graph(args: argparse.Namespace) -> int:
+    """Show the graph as pw-dump reports it, the way cleanup reads it."""
+    if not pipewire.have_graph():
+        print("pw-dump not found", file=sys.stderr)
+        return 1
+    try:
+        graph = pipewire.dump()
+    except pipewire.PipeWireError as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+
+    print(f"{BOLD}nodes{DIM}")
+    for node in graph.nodes:
+        media = node.media_class or "?"
+        module = str(node.pulse_module_id) if node.pulse_module_id is not None else "-"
+        print(f"  {node.id:<6} {media:<24} {node.name or '?'}  [{module}]")
+        if node.description:
+            print(f"  {'':<6} {'':<24} {DIM}{node.description}{DIM}")
+
+    duplicates = graph.duplicates()
+    if duplicates:
+        print(f"\n{_c('duplicate names', YELLOW)}")
+        for name, ids in duplicates.items():
+            print(f"  {name}: {', '.join(str(i) for i in ids)}")
+
+    print(f"\n{BOLD}links{DIM}")
+    for link in graph.links:
+        print(
+            f"  {link.id:<6} {link.output_node}:{link.output_port}"
+            f" -> {link.input_node}:{link.input_port}  {link.state or '?'}"
+        )
+    if not graph.links:
+        print(f"  {DIM}none{DIM}")
+    return 0
+
+
 def cmd_set_default(args: argparse.Namespace) -> int:
     cfg = config_mod.load(args.config)
     name = args.name
@@ -833,6 +869,10 @@ def build_parser() -> argparse.ArgumentParser:
     )
     pick.set_defaults(func=cmd_pick_key)
     sub.add_parser("sources", help="list PipeWire sources").set_defaults(func=cmd_list_sources)
+    sub.add_parser(
+        "graph",
+        help="show the PipeWire graph the way cleanup reads it",
+    ).set_defaults(func=cmd_graph)
     gate = sub.add_parser(
         "gate-check",
         help="watch the gate move on the PTT key, needs no microphone",

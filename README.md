@@ -121,7 +121,7 @@ a pass or a fail rather than a wall of log output:
 
 | key | check |
 | --- | --- |
-| 1 | environment, binaries, PipeWire, Flatpak audio |
+| 1 | environment, binaries, PipeWire, the graph, Flatpak audio |
 | 2 | input devices, which are readable, which the daemon would watch |
 | 3 | the virtual microphone exists and is named for applications |
 | 4 | the processing properties really reached the module |
@@ -199,6 +199,7 @@ reads the keyboard, it never grabs it, so your typing keeps working normally.
 | --- | --- |
 | `periferia check` | verify the environment, prints what is missing |
 | `periferia sources` | list sources, marks the physical one |
+| `periferia graph` | show the PipeWire graph the way cleanup reads it |
 | `periferia devices` | list input devices that look like keyboards |
 | `periferia pick-key` | press a key, get the yaml value for it |
 | `periferia ramp` | manual volume ramp, to check for clicks before PTT works |
@@ -628,6 +629,11 @@ another program grabs the same device first. Check with
 
 **Left-over module after a crash.** `periferia teardown`.
 
+**`periferia check` warns about the graph.** `pw-dump` is missing or the daemon
+could not be reached. Cleanup falls back to `pactl`, which works but finds the
+leftover by description instead of reading the id off the node. `pw-dump`
+ships with `pipewire`; `periferia graph` prints what it can see.
+
 **Flatpak app sees no sound.** Flatpak needs a Pulse socket. `periferia check`
 reports on this.
 
@@ -642,7 +648,9 @@ reports on this.
 - [ ] compressor and de-esser. Not going to happen here: filter-chain will not
       load, so there is nowhere to put one. EasyEffects does this properly
       already
-- [ ] direct PipeWire graph control, instead of going through pactl
+- [x] PipeWire graph read directly through `pw-dump`, so a leftover module is
+      found off the node itself rather than guessed at through pactl. Writing
+      still goes through pactl, which is the supported way to load a module
 - [ ] Flatpak packaging, AUR
 
 Remapping needs `/dev/uinput`, which this machine does not have, so the router

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib
+from typing import Any
 
 import pytest
 
@@ -211,6 +212,8 @@ def test_stale_detection_ignores_other_apps(monkeypatch: pytest.MonkeyPatch) -> 
     ]
     monkeypatch.setattr(pipewire_mod, "sources", lambda: listed)
     monkeypatch.setattr(pipewire_mod, "modules", lambda: modules)
+    # These read through pactl, so the graph has to be out of the way.
+    monkeypatch.setattr(pipewire_mod, "graph_module_ids", lambda _d: None)
 
     assert pipewire_mod.stale_modules("module-echo-cancel", "PeriferiaMic") == [7]
     assert pipewire_mod.stale_modules("module-echo-cancel", "") == []
@@ -252,6 +255,7 @@ def test_stale_modules_finds_a_leftover_without_a_module_id(
             },
         ],
     )
+    monkeypatch.setattr(pipewire_mod, "graph_module_ids", lambda _d: None)
 
     assert pipewire_mod.stale_modules("module-echo-cancel", "PeriferiaMic") == [536870917]
 
@@ -277,5 +281,62 @@ def test_stale_modules_ignores_a_module_that_is_not_ours(
         "modules",
         lambda: [{"name": "module-echo-cancel", "argument": "source=whatever"}],
     )
+    monkeypatch.setattr(pipewire_mod, "graph_module_ids", lambda _d: [42])
 
     assert pipewire_mod.stale_modules("module-echo-cancel", "PeriferiaMic") == []
+
+
+def test_stale_modules_reads_the_graph_and_skips_pactl(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The graph carries the pulse module id on the node itself, so the source
+    # list never has to be read. pactl is only a fallback for when pw-dump is
+    # missing or the daemon cannot be reached.
+    def boom() -> list[dict[str, Any]]:
+        raise AssertionError("sources() should not be called when the graph answers")
+
+    monkeypatch.setattr(pipewire_mod, "sources", boom)
+    monkeypatch.setattr(pipewire_mod, "graph_module_ids", lambda _d: [536870916])
+    monkeypatch.setattr(
+        pipewire_mod,
+        "modules",
+        lambda: [
+            {
+                "name": "module-echo-cancel",
+                "argument": "source=x source_properties=device.description=PeriferiaMic",
+            }
+        ],
+    )
+
+    assert pipewire_mod.stale_modules("module-echo-cancel", "PeriferiaMic") == [536870916]
+
+
+def test_stale_modules_waits_for_the_graph_to_be_readable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # None means "the graph could not be read", which is the cue to fall back,
+    # not an empty answer.
+    monkeypatch.setattr(pipewire_mod, "graph_module_ids", lambda _d: None)
+    monkeypatch.setattr(
+        pipewire_mod,
+        "sources",
+        lambda: [
+            {
+                "name": "echo-cancel-source",
+                "owner_module": 12,
+                "properties": {"device.description": "PeriferiaMic"},
+            }
+        ],
+    )
+    monkeypatch.setattr(
+        pipewire_mod,
+        "modules",
+        lambda: [
+            {
+                "name": "module-echo-cancel",
+                "argument": "source_properties=device.description=PeriferiaMic",
+            }
+        ],
+    )
+
+    assert pipewire_mod.stale_modules("module-echo-cancel", "PeriferiaMic") == [12]

@@ -58,6 +58,44 @@ def test_ramp_thread_finishes() -> None:
     assert mic.volume == pytest.approx(1.0)
 
 
+def test_a_slow_write_does_not_stretch_the_ramp() -> None:
+    # One write against pactl costs a fork and a server round trip, far more
+    # than the 5 ms the ramp used to allow per step. Counting steps made a
+    # 200 ms attack take the better part of a second, which is heard as the
+    # mic opening late. The ramp follows the clock instead.
+    seen: list[float] = []
+
+    def slow_slider(_source: str, value: float) -> None:
+        time.sleep(0.018)
+        seen.append(value)
+
+    mic = VirtualMic(AudioConfig(attack_ms=200), slider=slow_slider)
+    mic._source = "test-source"
+
+    started = time.monotonic()
+    mic.open_mic()
+    thread = mic._ramp_thread
+    assert thread is not None
+    thread.join(timeout=2.0)
+    elapsed = time.monotonic() - started
+
+    assert not thread.is_alive(), "ramp thread never finished"
+    assert elapsed < 0.4, f"a 200 ms attack took {elapsed:.3f}s"
+    assert mic.volume == pytest.approx(1.0)
+    assert seen[-1] == pytest.approx(1.0), "the ramp never wrote the final value"
+    assert seen == sorted(seen), "the ramp went backwards"
+
+
+def test_the_ramp_lands_exactly_on_the_target() -> None:
+    mic, seen = _mic(attack_ms=60)
+    mic.open_mic()
+    thread = mic._ramp_thread
+    assert thread is not None
+    thread.join(timeout=2.0)
+    assert seen[-1] == pytest.approx(1.0)
+    assert max(seen) == pytest.approx(1.0)
+
+
 class TestStaleSourceName:
     """PipeWire renames the echo-cancel output when the module is reloaded, so
     the name captured at startup can stop resolving while the source is fine.

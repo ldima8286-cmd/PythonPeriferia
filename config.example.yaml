@@ -81,6 +81,14 @@ processing:
   voice_detect: true
   tail_length_ms: 200
 
+  # Publish the microphone as a single mono channel carried by the input's
+  # left channel instead of letting every application downmix the two captured
+  # channels itself. This machine's two channels really differ (measured), and
+  # averaging them cancels the band above 3.5 kHz; keeping one channel keeps
+  # the whole band. PipeWire scales the mono copy by 1/2 (-3 dB), which
+  # `audio.target_volume` above 1.0 can compensate for.
+  stereo_to_mono: true
+
   # Anything else the module accepts.
   extra_props: {}
 

@@ -231,6 +231,7 @@ reads the keyboard, it never grabs it, so your typing keeps working normally.
 | `ptt.latch_ms` | 0 | hold this long to latch the mic open, 0 disables |
 | `ptt.max_press_ms` | 300000 | cut off a key held longer than this, 0 disables |
 | `processing.voice_detect` | true | cuts silence between phrases, turn it off if quiet words get lost |
+| `processing.stereo_to_mono` | true | publish one mono channel (left) instead of the untamed stereo source |
 | `macros` | empty | recorded keypress sequences, see below |
 
 ## The window
@@ -639,7 +640,8 @@ reports on this.
 
 ## Roadmap
 
-- [ ] stereo to mono, if it turns out the two channels really differ
+- [x] stereo to mono: the two channels really differ (measured), so the
+      virtual microphone publishes one mono channel carried by the left channel
 - [x] GUI for the config: profiles only, one at a time, comments kept
 - [x] input profiles: remap, turn a key off entirely, pointer speed per
       profile, and on KWin the profile follows the focused window
@@ -667,9 +669,10 @@ On any other compositor the watcher does not start and the first enabled profile
 stays in force.
 
 Stereo to mono is listed in the original notes as a fix for phasing on a mono
-jack. It is not implemented, and the reason was misdiagnosed once already:
-`pactl load-module module-filter-chain` fails with "no such object", but that
-does not mean the module is missing. `libpipewire-module-filter-chain.so` is
+jack. It is implemented now, decided on the basis of a measurement rather than
+a guess. The reason it is not a filter-chain chain was misdiagnosed once
+already: `pactl load-module module-filter-chain` fails with "no such object",
+but that does not mean the module is missing. `libpipewire-module-filter-chain.so` is
 present in the ostree image, and `pactl list short modules` only ever lists
 loaded modules, so its absence from that list proved nothing. The load fails from a real shell too, with the short module name and a graph
 copied from the manual, so filter-chain is not reachable through
@@ -678,10 +681,34 @@ independent attempts, both with the same error, so treat that as settled.
 filter-chain is also where a compressor would have to live, which is why
 compression is delegated to EasyEffects.
 
-It is also not established that the problem exists. A card that duplicates one
-mono input into both channels needs no downmix, and no one has measured whether
-these two channels actually differ. Recording a second and comparing the two
-channels settles that.
+It is now established and measured that the two channels of this machine's
+microphone really differ, so the original question is settled and the fix is
+not a no-op. A control recording of the speakers' monitor comes out bit-identical
+left and right, which rules out the measurement chain: whatever differs
+afterwards is real. The microphone itself shows a static ~1-2 dB left-over-right
+imbalance, phase that drifts towards 180° above 3.5 kHz, and coherence with the
+left channel that falls from ~0.9 below 1.5 kHz to ~0.55 by 3.5-8 kHz. Averaging
+the two channels into mono is measurably worse than either channel alone:
+noise-subtracted, the average is 0.9 dB quieter than the left channel at
+50-300 Hz and 3.4 to 6.4 dB quieter in the 1.5-8 kHz band, so an application's
+downmix really does cancel a large part of the band. Keeping one channel (the
+left, the louder one) keeps the whole band.
+
+So the chain is `module-echo-cancel` - whose output is always stereo, however
+its input is wired - feeding a `module-remap-source` that declares
+`master_channel_map=front-left channels=1 channel_map=mono`. The virtual
+microphone becomes one mono channel, and no application can reintroduce the
+cancellation. PipeWire mixes the single channel down by 1/sqrt(2), a flat
+-3.0 dB relative to the channel, which `audio.target_volume` above 1.0
+compensates for if wanted; `processing.stereo_to_mono: false` restores the
+unmodified stereo source.
+
+One finding along the way is worth keeping: `pactl load-module
+module-echo-cancel source=...` accepts but ignores the `source` argument in
+this PipeWire build (`source_master=...` errors out with "no such object"), and
+`module-echo-cancel` cannot point its capture at anything but the default
+source. The mono stage does not depend on that: it remaps the echo-cancel
+output instead of the physical capture.
 
 ## License
 

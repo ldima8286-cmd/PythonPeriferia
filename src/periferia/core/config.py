@@ -69,6 +69,13 @@ class ProcessingConfig:
     tail_length_ms: int = 200
     extra_props: dict[str, str] = dataclasses.field(default_factory=dict)
 
+    # Publish the virtual microphone as one mono channel carried by the left
+    # input channel, instead of letting every application downmix the two
+    # captured channels itself. The two channels of the measured hardware are
+    # not copies of one mono input (they really differ), and averaging them
+    # cancels the band above 3.5 kHz; keeping one channel keeps the whole band.
+    stereo_to_mono: bool = True
+
     enabled: bool = True
 
 

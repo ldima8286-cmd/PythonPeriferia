@@ -27,6 +27,9 @@ class _FakePipewire:
         self.unloaded: list[int] = []
         self.stale: list[int] = []
         self.stale_checked: list[tuple[str, str]] = []
+        self.volumes: list[tuple[str, float]] = []
+        self.source_for: dict[int, str] = {}
+        self.fail_kinds: set[str] = set()
         self._next_id = 77
 
     def find_source(self, name: str) -> str | None:
@@ -36,11 +39,17 @@ class _FakePipewire:
         return False
 
     def source_by_module(self, module_id: int) -> str | None:
-        return self.source
+        return self.source_for.get(module_id, self.source)
+
+    def set_volume(self, name: str, fraction: float) -> None:
+        self.volumes.append((name, fraction))
 
     def load_module(self, kind: str, args: list[str]) -> int:
+        if kind in self.fail_kinds:
+            return None  # type: ignore[return-value]
         self.loaded.append((kind, args))
-        return self._next_id
+        self._next_id += 1
+        return self._next_id - 1
 
     def unload_module(self, module_id: int) -> bool:
         self.unloaded.append(module_id)
@@ -85,7 +94,8 @@ def test_named_module_stays_loaded_when_the_source_appears(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     # Control case: on the happy path nothing may be unloaded.
-    processing, fake = _processing(monkeypatch, source="echo-cancel-source")
+    cfg = ProcessingConfig(stereo_to_mono=False)
+    processing, fake = _processing(monkeypatch, source="echo-cancel-source", cfg=cfg)
 
     assert processing.start("hw:physical", name="PeriferiaMic") == "echo-cancel-source"
     assert fake.unloaded == []
@@ -94,7 +104,8 @@ def test_named_module_stays_loaded_when_the_source_appears(
 def test_start_publishes_the_requested_name(monkeypatch: pytest.MonkeyPatch) -> None:
     # Applications pick the mic by its description, so the name has to reach
     # PipeWire as source_properties.
-    processing, fake = _processing(monkeypatch, source="echo-cancel-source")
+    cfg = ProcessingConfig(stereo_to_mono=False)
+    processing, fake = _processing(monkeypatch, source="echo-cancel-source", cfg=cfg)
 
     processing.start("hw:physical", name="PeriferiaMic")
 
@@ -109,7 +120,7 @@ def test_start_still_names_the_source_when_processing_is_off(
 ) -> None:
     # With processing disabled the module earns its place only by providing a
     # stable name, but that is still what the daemon needs for PTT to work.
-    off = ProcessingConfig(enabled=False)
+    off = ProcessingConfig(enabled=False, stereo_to_mono=False)
     processing, fake = _processing(monkeypatch, source="echo-cancel-source", cfg=off)
 
     assert processing.start("hw:physical", name="PeriferiaMic") == "echo-cancel-source"
@@ -162,24 +173,134 @@ def test_stale_module_is_unloaded_before_loading_a_new_one(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     # A killed run leaves the module up and the new source collides on name, so
-    # the gate drives one source while the self check reads the other.
-    processing, fake = _processing(monkeypatch, source="echo-cancel-source")
+    # the gate drives one source while the self check reads the other. Both
+    # module kinds are cleared, because a previous run under stereo_to_mono
+    # leaves a remap carrying the very same name.
+    legacy = ProcessingConfig(stereo_to_mono=False)
+    processing, fake = _processing(monkeypatch, source="echo-cancel-source", cfg=legacy)
     fake.stale = [41, 42]
 
     processing.start("hw:physical", name="PeriferiaMic")
 
-    assert fake.unloaded == [41, 42], "leftovers have to go before ours loads"
-    assert fake.stale_checked == [("module-echo-cancel", "PeriferiaMic")]
+    assert fake.unloaded == [41, 42, 41, 42], "leftovers have to go before ours loads"
+    assert fake.stale_checked == [
+        ("module-remap-source", "PeriferiaMic"),
+        ("module-echo-cancel", "PeriferiaMic"),
+    ]
 
 
 def test_no_stale_module_means_nothing_extra_is_unloaded(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    processing, fake = _processing(monkeypatch, source="echo-cancel-source")
+    processing, fake = _processing(
+        monkeypatch,
+        source="echo-cancel-source",
+        cfg=ProcessingConfig(stereo_to_mono=False),
+    )
 
     processing.start("hw:physical", name="PeriferiaMic")
 
     assert fake.unloaded == []
+
+
+def test_mono_publishes_left_channel_as_a_single_mono_channel(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The echo-cancel output is stereo however its input is wired, and its two
+    # channels are not duplicates of one mono input, so an app downmixing them
+    # can cancel a band. The remap on top publishes one mono channel fed by the
+    # left channel of that stage, which no downmix can cancel.
+    processing, fake = _processing(monkeypatch, source="echo-cancel-source")
+    fake.source_for = {78: "PeriferiaMic"}
+
+    assert processing.start("hw:physical", name="PeriferiaMic") == "PeriferiaMic"
+
+    assert [kind for kind, _ in fake.loaded] == [
+        "module-echo-cancel",
+        "module-remap-source",
+    ]
+
+    ec_args = fake.loaded[0][1]
+    assert "source=hw:physical" in ec_args
+    assert "source_properties=device.description=PeriferiaMic-stage" in ec_args
+
+    remap_args = fake.loaded[1][1]
+    assert "master=echo-cancel-source" in remap_args
+    assert "master_channel_map=front-left" in remap_args
+    assert "channel_map=mono" in remap_args
+    assert "channels=1" in remap_args
+    assert "source_name=PeriferiaMic" in remap_args
+    assert "source_properties=device.description=PeriferiaMic" in remap_args
+
+
+def test_mono_pins_the_stage_volume(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Nothing else touches the echo-cancel stage once the gate drives the mono
+    # source, so the stage must not attenuate what the remap captures.
+    processing, fake = _processing(monkeypatch, source="echo-cancel-source")
+
+    processing.start("hw:physical", name="PeriferiaMic")
+
+    assert fake.volumes == [("echo-cancel-source", 1.0)]
+
+
+def test_mono_clears_leftovers_of_both_module_kinds(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A run under stereo_to_mono=False leaves the echo-cancel carrying the
+    # virtual name, a run under the default leaves an extra remap behind.
+    # Either has to go before anything new loads, or two sources answer to
+    # one name.
+    processing, fake = _processing(monkeypatch, source="echo-cancel-source")
+    fake.stale = [41, 42]
+
+    processing.start("hw:physical", name="PeriferiaMic")
+
+    assert fake.stale_checked == [
+        ("module-remap-source", "PeriferiaMic"),
+        ("module-echo-cancel", "PeriferiaMic"),
+        ("module-echo-cancel", "PeriferiaMic-stage"),
+    ]
+    assert set(fake.unloaded) == {41, 42}
+
+
+def test_mono_remap_failure_rolls_back(monkeypatch: pytest.MonkeyPatch) -> None:
+    processing, fake = _processing(monkeypatch, source="echo-cancel-source")
+    fake.fail_kinds = {"module-remap-source"}
+
+    assert processing.start("hw:physical", name="PeriferiaMic") is None
+    assert [kind for kind, _ in fake.loaded] == ["module-echo-cancel"]
+    assert fake.unloaded == [77], "the stage has to go down with the failed remap"
+
+
+def test_mono_remap_that_creates_no_source_rolls_back(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    processing, fake = _processing(monkeypatch, source=None)
+    fake.source_for = {77: "echo-cancel-source"}
+
+    assert processing.start("hw:physical", name="PeriferiaMic") is None
+    assert fake.unloaded == [78, 77], "remap first, then the stage it captures"
+
+
+def test_mono_teardown_unloads_remap_before_the_stage(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    processing, fake = _processing(monkeypatch, source="echo-cancel-source")
+    processing.start("hw:physical", name="PeriferiaMic")
+    fake.unloaded.clear()
+
+    processing.stop()
+
+    assert fake.unloaded == [78, 77], "the capturing remap has to go first"
+
+
+def test_mono_needs_a_name(monkeypatch: pytest.MonkeyPatch) -> None:
+    # With nothing to publish into there is no reason to add a second module:
+    # keep the single echo-cancel behaviour.
+    processing, fake = _processing(monkeypatch, source="echo-cancel-source")
+
+    assert processing.start("hw:physical") == "echo-cancel-source"
+    assert [kind for kind, _ in fake.loaded] == ["module-echo-cancel"]
 
 
 def test_stale_detection_ignores_other_apps(monkeypatch: pytest.MonkeyPatch) -> None:

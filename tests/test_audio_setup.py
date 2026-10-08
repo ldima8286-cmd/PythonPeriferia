@@ -303,6 +303,34 @@ def test_mono_needs_a_name(monkeypatch: pytest.MonkeyPatch) -> None:
     assert [kind for kind, _ in fake.loaded] == ["module-echo-cancel"]
 
 
+def test_mono_obeys_the_devices_mono_from(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The channel kept is a per-device decision: a card oriented the other way
+    # around wants the right one. It travels through the config, not a module
+    # constant.
+    processing, fake = _processing(monkeypatch, source="echo-cancel-source")
+    fake.source_for = {78: "PeriferiaMic"}
+    processing.configure(
+        ProcessingConfig(stereo_to_mono=True, mono_from="front-right")
+    )
+
+    assert processing.start("hw:physical", name="PeriferiaMic") == "PeriferiaMic"
+    remap_args = fake.loaded[1][1]
+    assert "master_channel_map=front-right" in remap_args
+
+
+def test_configure_takes_effect_on_the_next_start(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A device change does not rebuild anything by itself: the numbers are
+    # adopted here, and the chain that reads them is rebuilt by the caller.
+    processing, _ = _processing(monkeypatch, source="echo-cancel-source")
+    other = ProcessingConfig(noise_suppression=False, stereo_to_mono=False)
+
+    processing.configure(other)
+
+    assert processing.cfg is other
+
+
 def test_stale_detection_ignores_other_apps(monkeypatch: pytest.MonkeyPatch) -> None:
     # Only our own leftovers, matched on the description we asked for, because
     # the source name is not the same on every machine.
@@ -461,3 +489,18 @@ def test_stale_modules_waits_for_the_graph_to_be_readable(
     )
 
     assert pipewire_mod.stale_modules("module-echo-cancel", "PeriferiaMic") == [12]
+
+
+def test_gate_configure_swaps_the_device_settings(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A device profile overrides the gate numbers key by key, so the gate has
+    # to be able to adopt them without rebuilding anything.
+    mic = _mic(monkeypatch)
+    mic._physical = "old"
+    other = AudioConfig(attack_ms=7, curve="linear")
+
+    mic.configure(other)
+
+    assert mic.cfg is other
+    assert mic._physical is None, "re-resolve against the new settings"

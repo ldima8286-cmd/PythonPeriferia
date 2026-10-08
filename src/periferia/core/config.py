@@ -76,7 +76,44 @@ class ProcessingConfig:
     # cancels the band above 3.5 kHz; keeping one channel keeps the whole band.
     stereo_to_mono: bool = True
 
+    # Which input channel carries the mono one. PipeWire names a channel by its
+    # position, "front-left" being the left one, and the step from the measured
+    # hardware was chosen because its left channel turned out louder and more
+    # intact. A card oriented the other way around wants "front-right".
+    mono_from: str = "front-left"
+
     enabled: bool = True
+
+
+@dataclasses.dataclass(slots=True)
+class DeviceProfile:
+    """Settings that follow a capture device, matched by the properties it has.
+
+    Nominal gain, whether echo cancellation is worth anything and which channel
+    to keep are properties of the hardware, not of the machine: a quiet analog
+    jack and a USB headset want different answers. Each entry names the device
+    and overrides the matching top-level section key by key.
+
+    `match` is compared to the properties PipeWire reports for a source —
+    `node.name`, `device.bus` ("pci", "usb"), `device.vendor.name`,
+    `device.product.name`, `alsa.card_name`, `device.form_factor`, and anything
+    else the card carries. Every rule has to agree for the entry to apply, and
+    the first entry that applies wins. An entry with no `match` applies to any
+    device, which makes it the fallback; it earns that name best when it sits
+    last. `periferia sources` shows which entry a device would get.
+
+    The audio/processing values here are overrides: an absent key keeps the
+    value from the top-level `audio:`/`processing:` section. Both sections take
+    only keys the real section would, and anything else is rejected like any
+    unknown key, so nobody has to try the audio section to learn that `volume`
+    is not one of its keys.
+    """
+
+    name: str = ""
+    enabled: bool = True
+    match: dict[str, str] = dataclasses.field(default_factory=dict)
+    audio: dict[str, Any] = dataclasses.field(default_factory=dict)
+    processing: dict[str, Any] = dataclasses.field(default_factory=dict)
 
 
 @dataclasses.dataclass(slots=True)
@@ -182,6 +219,7 @@ class Config:
     log: LogConfig = dataclasses.field(default_factory=LogConfig)
     macros: list[MacroConfig] = dataclasses.field(default_factory=list)
     profiles: list[ProfileConfig] = dataclasses.field(default_factory=list)
+    devices: list[DeviceProfile] = dataclasses.field(default_factory=list)
     path: Path | None = None
 
     def to_dict(self) -> dict[str, Any]:
@@ -192,6 +230,7 @@ class Config:
             "log": _unbox(self.log),
             "macros": [_unbox(m) for m in self.macros],
             "profiles": [_unbox(p) for p in self.profiles],
+            "devices": [_unbox(d) for d in self.devices],
         }
 
 
@@ -254,6 +293,85 @@ def _build_profiles(data: Any) -> list[ProfileConfig]:
     return out
 
 
+def _override(cls: type, data: Any, where: str) -> dict[str, Any]:
+    """Validate an override section without building a whole config from it.
+
+    Only the keys a section really takes are accepted, spelled against the same
+    field list the section itself is built with. Values are left as written:
+    the top-level section supplies the base, so an absent key must not sneak in
+    a default here.
+    """
+    if not isinstance(data, dict):
+        raise ValueError(f"{where}: expected a mapping, got {type(data).__name__}")
+    unknown = set(data) - {f.name for f in dataclasses.fields(cls)}
+    if unknown:
+        raise ValueError(f"{where}: unknown keys: {sorted(unknown)}")
+    return dict(data)
+
+
+def _build_devices(data: Any) -> list[DeviceProfile]:
+    if data is None:
+        return []
+    if not isinstance(data, list):
+        raise ValueError(f"expected a list for devices, got {type(data).__name__}")
+    out = []
+    for index, item in enumerate(data):
+        where = f"devices[{index}]"
+        if not isinstance(item, dict):
+            raise ValueError(f"{where}: expected a mapping")
+        try:
+            device = _build(DeviceProfile, item)
+        except ValueError as exc:
+            raise ValueError(f"{where}: {exc}") from None
+        device.audio = _override(AudioConfig, item.get("audio") or {}, f"{where}.audio")
+        device.processing = _override(
+            ProcessingConfig, item.get("processing") or {}, f"{where}.processing"
+        )
+        out.append(device)
+    return out
+
+
+def _props_match(rules: dict[str, str], props: dict[str, Any]) -> bool:
+    """Whether one match rule agrees with the properties a source has.
+
+    A rule is a flat "property has this exact value", which keeps matching
+    predictable; everything a rule can say is visible in `periferia props`.
+    """
+    return all(str(props.get(key)) == str(wanted) for key, wanted in rules.items())
+
+
+def match_profile(cfg: Config, props: dict[str, Any] | None) -> DeviceProfile | None:
+    """The first enabled device entry that owns `props`, if any.
+
+    An entry with no rules matches anything, which is what makes it the
+    fallback profile. Disabled entries are skipped as if they were not there.
+    """
+    props = props or {}
+    for device in cfg.devices:
+        if not device.enabled:
+            continue
+        if _props_match(device.match, props):
+            return device
+    return None
+
+
+def effective(cfg: Config, profile: DeviceProfile | None) -> tuple[AudioConfig, ProcessingConfig]:
+    """The settings in force for one device: defaults overlaid by its entry.
+
+    The top-level sections stay the base so a config that never mentions
+    `devices:` keeps working as before, and a device entry only has to write
+    what differs from them.
+    """
+    audio = cfg.audio
+    processing = cfg.processing
+    if profile is not None:
+        if profile.audio:
+            audio = dataclasses.replace(audio, **profile.audio)
+        if profile.processing:
+            processing = dataclasses.replace(processing, **profile.processing)
+    return audio, processing
+
+
 def find_config(explicit: str | Path | None = None) -> Path | None:
     if explicit:
         return _expand(str(explicit))
@@ -287,6 +405,7 @@ def load(explicit: str | Path | None = None) -> Config:
         macros=_build_macros(data.get("macros"), "macros"),
         log=_build(LogConfig, data.get("log")),
         profiles=_build_profiles(data.get("profiles")),
+        devices=_build_devices(data.get("devices")),
         path=path,
     )
 

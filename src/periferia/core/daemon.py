@@ -489,6 +489,23 @@ class Daemon:
         with self._events_lock:
             return [t for t, n in reversed(self._events) if n == name and t >= since]
 
+    def _use_device(self, physical: str) -> str | None:
+        """Resolve the per-device settings and build the chain from them.
+
+        The registry matches the physical source by the properties PipeWire
+        reports for it, and the matching entry overrides the top-level audio
+        and processing sections key by key. The gate and the chain then adopt
+        those numbers, so a quiet analog jack and a USB headset each get their
+        own settings on the same machine.
+        """
+        profile = config_mod.match_profile(self.cfg, pipewire_mod.source_props(physical))
+        if profile is not None:
+            log.info("device profile %r applies to %s", profile.name or "(unnamed)", physical)
+        audio_cfg, processing_cfg = config_mod.effective(self.cfg, profile)
+        self.mic.configure(audio_cfg)
+        self.processing.configure(processing_cfg)
+        return self.processing.start(physical, name=audio_cfg.virtual_name)
+
     def _rebuild_source(self) -> str | None:
         """Load the echo-cancel module again and hand back the new source name.
 
@@ -507,7 +524,7 @@ class Daemon:
             return None
         log.warning("%s is gone, loading it again", self.mic.source)
         self.processing.stop()
-        virtual = self.processing.start(physical, name=self.cfg.audio.virtual_name)
+        virtual = self._use_device(physical)
         if not virtual:
             log.error("could not load the source again, PTT is not working")
             return None
@@ -540,12 +557,11 @@ class Daemon:
         # loopback created no node on WirePlumber 0.5 and the daemon died on
         # every start. The module can name its own output, so it is the whole
         # chain now.
-        virtual = self.processing.start(physical, name=self.cfg.audio.virtual_name)
+        virtual = self._use_device(physical)
         if not virtual:
             log.warning(
-                "could not create %s, falling back to the raw %s. "
+                "could not create the virtual source, falling back to the raw %s. "
                 "The physical microphone cannot be gated, so PTT will not work",
-                self.cfg.audio.virtual_name,
                 physical,
             )
             virtual = physical

@@ -232,7 +232,42 @@ reads the keyboard, it never grabs it, so your typing keeps working normally.
 | `ptt.max_press_ms` | 300000 | cut off a key held longer than this, 0 disables |
 | `processing.voice_detect` | true | cuts silence between phrases, turn it off if quiet words get lost |
 | `processing.stereo_to_mono` | true | publish one mono channel (left) instead of the untamed stereo source |
+| `processing.mono_from` | front-left | which input channel the mono one is taken from |
+| `devices` | empty | per-device overrides, see below |
 | `macros` | empty | recorded keypress sequences, see below |
+
+### Settings that follow a device
+
+The top-level `audio:` and `processing:` sections are the base, and they answer
+for whatever ends up as the microphone. A card's handling, though, is a
+property of the card: quiet analog jacks and USB headsets want different gain,
+and a mono headset needs neither the mono stage nor echo cancellation. The
+`devices:` list overrides the two sections key by key for the device a `match`
+names, first match wins:
+
+```yaml
+devices:
+  - name: usb headset
+    match:
+      device.bus: usb
+    processing:
+      echo_cancellation: false
+      stereo_to_mono: false
+  - name: analog jack
+    match:
+      node.name: alsa_input.pci-0000_00_1f.3.analog-stereo
+    audio:
+      target_volume: 1.0
+    processing:
+      mono_from: front-left
+```
+
+A rule is "this property of the device has this exact value". Every source
+carries the vocabulary, and `periferia props` prints what the physical mic has
+to match against. `periferia sources` shows which entry each device would get.
+An entry with no `match` applies to any device, which makes it the fallback;
+put it last. `device.bus: usb` above is just an example - on a machine where
+the only microphone is a USB one, tune the fallback instead.
 
 ## The window
 

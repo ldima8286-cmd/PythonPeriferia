@@ -523,15 +523,40 @@ def cmd_list_sources(args: argparse.Namespace) -> int:
         print("no sources")
         return 1
 
+    cfg = config_mod.load(args.config)
+
     for item in items:
         name = item.get("name") or "?"
         tag = "virtual" if pipewire.is_virtual(name) else "physical"
         muted = "muted" if item.get("mute") else ""
         print(f"[{tag:7}] {name}  {muted}")
+        if not pipewire.is_virtual(name):
+            profile = config_mod.match_profile(cfg, pipewire.source_props(name))
+            who = profile.name if profile else "(none)"
+            print(f"           -> profile: {who}")
 
     default = pipewire.default_source()
     print(f"\ndefault source: {default or 'unknown'}")
     print(f"physical mic  : {audio_mod.pick_physical_source('auto') or 'none found'}")
+    return 0
+
+
+def cmd_source_props(args: argparse.Namespace) -> int:
+    """Print what a device carries, the vocabulary a `devices:` match uses."""
+    cfg = config_mod.load(args.config)
+    name = args.name or audio_mod.pick_physical_source(cfg.audio.physical_source) or ""
+    if not name:
+        print("no source to describe", file=sys.stderr)
+        return 1
+    props = pipewire.source_props(name)
+    if not props:
+        print(f"{name} has no properties", file=sys.stderr)
+        return 1
+    for key in sorted(props):
+        print(f"{key} = {props[key]}")
+    profile = config_mod.match_profile(cfg, props)
+    who = profile.name if profile else "(none)"
+    print(f"\nprofile: {who}")
     return 0
 
 
@@ -776,6 +801,16 @@ def cmd_config(args: argparse.Namespace) -> int:
     print(f"config: {path or 'defaults (no file found)'}")
     for section, values in config_mod.load(args.config).to_dict().items():
         print(f"\n[{section}]")
+        if isinstance(values, list):
+            if not values:
+                print("  (none)")
+                continue
+            for index, entry in enumerate(values):
+                print(f"  [{index}]")
+                if isinstance(entry, dict):
+                    for key, value in entry.items():
+                        print(f"    {key} = {value!r}")
+            continue
         for key, value in values.items():
             print(f"  {key} = {value!r}")
     return 0
@@ -869,6 +904,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     pick.set_defaults(func=cmd_pick_key)
     sub.add_parser("sources", help="list PipeWire sources").set_defaults(func=cmd_list_sources)
+    p = sub.add_parser("props", help="show the properties a source matches against")
+    p.add_argument("name", nargs="?", help="source name; without one, the physical mic")
+    p.set_defaults(func=cmd_source_props)
     sub.add_parser(
         "graph",
         help="show the PipeWire graph the way cleanup reads it",

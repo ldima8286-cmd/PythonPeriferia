@@ -7,8 +7,8 @@ module properties. Turning them on is configuration, not code.
 Stereo to mono is a small second stage on top: module-echo-cancel always
 publishes a stereo source, and its two channels are not duplicates of one mono
 input, so an application that downmixes them can cancel the band above 3.5 kHz.
-module-remap-source publishes a single mono channel fed by the left channel of
-the echo-cancel output, which no downmix can cancel.
+module-remap-source publishes a single mono channel fed by one channel of the
+echo-cancel output (processing.mono_from), which no downmix can cancel.
 """
 
 from __future__ import annotations
@@ -23,10 +23,6 @@ log = logging.getLogger(__name__)
 
 MODULE = "module-echo-cancel"
 REMAP = "module-remap-source"
-
-# PipeWire's remap picks the master channel by its position. Averaging the two
-# channels instead would keep the cancellation this stage exists to remove.
-MONO_FROM = "front-left"
 
 
 def build_props(cfg: ProcessingConfig) -> dict[str, str]:
@@ -53,6 +49,13 @@ class MicProcessing:
         self._module_id: int | None = None
         self._remap_id: int | None = None
         self._source: str | None = None
+
+    def configure(self, cfg: ProcessingConfig) -> None:
+        """Adopt the settings of the device that is in use.
+
+        The next start() builds the chain from them; nothing is reloaded here.
+        """
+        self.cfg = cfg
 
     @property
     def source(self) -> str | None:
@@ -144,7 +147,10 @@ class MicProcessing:
             [
                 f"master={self._source}",
                 "channels=1",
-                f"master_channel_map={MONO_FROM}",
+                # PipeWire picks the master channel by its position. Averaging
+                # the two channels instead would keep the cancellation this
+                # stage exists to remove.
+                f"master_channel_map={self.cfg.mono_from}",
                 "channel_map=mono",
                 f"source_name={name}",
                 f"source_properties=device.description={name}",

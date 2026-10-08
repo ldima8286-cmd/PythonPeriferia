@@ -89,10 +89,46 @@ processing:
   # `audio.target_volume` above 1.0 can compensate for.
   stereo_to_mono: true
 
+  # Which input channel the mono one is taken from. "front-left" is the left
+  # one, which this machine's measurement picked because it was louder and
+  # more intact; a card oriented the other way wants "front-right".
+  mono_from: front-left
+
   # Anything else the module accepts.
   extra_props: {}
 
   enabled: true
+
+# Settings that follow a capture device, not the machine. The audio and
+# processing sections above stay the base; each entry below overrides them key
+# by key for the device its `match` names, and the first entry that applies
+# wins. The rules are compared to the properties PipeWire reports for a source:
+# node.name, device.bus ("pci", "usb"), device.vendor.name, device.product.name,
+# alsa.card_name, device.form_factor, ... Run "periferia sources" to see which
+# device would get which profile, and "periferia props" for everything one
+# device has.
+#
+# An entry with no `match` applies to any device, which makes it the fallback;
+# put it last. A USB headset is mono already, so it needs neither the mono
+# stage nor echo cancellation (there is no speaker to echo from), while the
+# built-in jack wants both:
+#
+# devices:
+#   - name: usb headset
+#     match:
+#       device.bus: usb
+#     processing:
+#       echo_cancellation: false
+#       stereo_to_mono: false
+#   - name: analog jack
+#     match:
+#       node.name: alsa_input.pci-0000_00_1f.3.analog-stereo
+#     audio:
+#       target_volume: 1.0
+#     processing:
+#       stereo_to_mono: true
+#       mono_from: front-left
+devices: []
 
 log:
   level: info

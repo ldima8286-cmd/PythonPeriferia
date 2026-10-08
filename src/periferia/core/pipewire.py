@@ -130,6 +130,20 @@ def source_exists(name: str) -> bool:
     return get_source(name) is not None
 
 
+def source_props(name: str) -> dict[str, Any]:
+    """The properties PipeWire reports for a source, for matching a device.
+
+    `node.name`, `device.bus`, `device.vendor.name`, `device.product.name`,
+    `alsa.card_name`, `device.form_factor` and whatever else the card carries.
+    A source that is gone yields an empty mapping, so a match on properties
+    falls through to an entry with no rules.
+    """
+    item = get_source(name)
+    if item is None:
+        return {}
+    return dict(item.get("properties") or {})
+
+
 def get_volume(name: str) -> float | None:
     """What fraction of full volume a source is carrying right now.
 

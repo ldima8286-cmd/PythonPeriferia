@@ -108,6 +108,16 @@ class VirtualMic:
             self._physical = pick_physical_source(self.cfg.physical_source)
         return self._physical
 
+    def configure(self, cfg: AudioConfig) -> None:
+        """Adopt the settings of the device that is in use.
+
+        The gate keeps its source; only the numbers that describe the device
+        change, so the next ramp uses them. The physical source is re-resolved
+        on the next pick, in case the profile changed where to look.
+        """
+        self.cfg = cfg
+        self._physical = None
+
     def attach(self, source: str | None) -> str | None:
         """Bind the gate to an already created source.
 

@@ -127,6 +127,42 @@ class ProfileDraft:
         )
 
 
+@dataclasses.dataclass
+class DeviceDraft:
+    """One device entry as the window holds it.
+
+    A draft is deliberately not a DeviceProfile. Audio and processing are kept
+    as rows so the window can edit them one key at a time, and the entry is
+    written back from those rows without touching the sections or entries the
+    window has no opinion about.
+    """
+
+    name: str = ""
+    match: list[Row] = dataclasses.field(default_factory=list)
+    audio: list[Row] = dataclasses.field(default_factory=list)
+    processing: list[Row] = dataclasses.field(default_factory=list)
+
+    def clean(self) -> DeviceDraft:
+        """A draft with the fields nobody finished filling in dropped.
+
+        A match rule with an empty property or value would be written and then
+        match nothing, which looks exactly like a rule that is not there.
+        """
+        def pairs(rows: list[Row]) -> list[Row]:
+            return [
+                (str(key).strip(), str(value).strip())
+                for key, value in rows
+                if str(key).strip() and str(value).strip()
+            ]
+
+        return DeviceDraft(
+            name=self.name.strip(),
+            match=pairs(self.match),
+            audio=pairs(self.audio),
+            processing=pairs(self.processing),
+        )
+
+
 def draft_from_profile(entry: Any) -> ProfileDraft:
     """A draft holding what the window can edit about one configured profile."""
     return ProfileDraft(
@@ -157,6 +193,22 @@ def first_editable(profiles: Iterable[Any]) -> ProfileDraft | None:
         if draft.rows or draft.match or draft.speed is not None:
             return draft
     return drafts[0] if drafts else None
+
+
+def draft_from_device(entry: Any) -> DeviceDraft:
+    """A draft holding what the window can edit about one device entry."""
+    return DeviceDraft(
+        name=str(getattr(entry, "name", "") or ""),
+        match=[(str(k), str(v)) for k, v in (getattr(entry, "match", None) or {}).items()],
+        audio=[(str(k), str(v)) for k, v in (getattr(entry, "audio", None) or {}).items()],
+        processing=[
+            (str(k), str(v)) for k, v in (getattr(entry, "processing", None) or {}).items()
+        ],
+    )
+
+
+def drafts_from_devices(devices: Iterable[Any]) -> list[DeviceDraft]:
+    return [draft_from_device(entry) for entry in devices]
 
 
 def add_row(rows: Sequence[Row], source: str, target: str) -> list[Row]:
@@ -197,6 +249,61 @@ def rows_to_mapping(rows: Sequence[Row]) -> dict[str, str]:
         if source in out:
             raise RemapError(f"{source} is mapped twice in the same profile")
         out[source] = target
+    return out
+
+
+def rows_to_dict(rows: Sequence[Row]) -> dict[str, str]:
+    """Rows as a mapping, refusing a key written twice.
+
+    The same shape as rows_to_mapping but for the plain key/value tables a
+    device entry is made of (match rules and audio/processing overrides),
+    where a repeated key is an ambiguity that is not worth risking.
+    """
+    out: dict[str, str] = {}
+    for key, value in rows:
+        if key in out:
+            raise ValueError(f"{key} is written twice in the same entry")
+        out[key] = value
+    return out
+
+
+def _coerce_value(hint: Any, value: str) -> Any:
+    if hint is bool:
+        text = value.strip().lower()
+        if text in ("true", "yes", "on", "1"):
+            return True
+        if text in ("false", "no", "off", "0"):
+            return False
+        return value
+    if hint is int:
+        try:
+            return int(value)
+        except ValueError:
+            return value
+    if hint is float:
+        try:
+            return float(value)
+        except ValueError:
+            return value
+    return value
+
+
+def typed_section(cls: type, rows: Sequence[Row]) -> dict[str, Any]:
+    """Table rows as the typed values the config stores them as.
+
+    The window keeps every section as rows of text, so `target_volume` reads
+    as the string "1.0". Written into the file as a string it would not be the
+    number the field is, and the strict reader would refuse it on the next
+    startup. The field's own type decides what "1.0" means here; a value that
+    cannot be that type stays text and the validator refuses it with the key
+    named.
+    """
+    import typing
+
+    hints = typing.get_type_hints(cls)
+    out: dict[str, Any] = {}
+    for key, value in rows_to_dict(rows).items():
+        out[key] = _coerce_value(hints.get(key, str), value)
     return out
 
 
@@ -382,6 +489,133 @@ def check_draft(draft: ProfileDraft, others: Sequence[ProfileDraft] = ()) -> str
         build_remap(rows_to_mapping(cleaned.rows))
     except RemapError as exc:
         return str(exc)
+    return None
+
+
+def save_device(
+    path: Path,
+    draft: DeviceDraft,
+    previous_name: str | None = None,
+) -> None:
+    """Write one device entry back, touching nothing else in the file.
+
+    Round-trip YAML for the same reason save_draft uses it: the config tries to
+    stay the file the user wrote, with its comments and its other sections.
+
+    The entry is found by `previous_name` when it is being renamed, and by its
+    own name otherwise. Only `name`, `match`, `audio` and `processing` are
+    written; the entry's `enabled` flag stays whatever the file said.
+    """
+    from ..core.config import AudioConfig, ProcessingConfig
+
+    cleaned = draft.clean()
+    match = rows_to_dict(cleaned.match)
+    audio = typed_section(AudioConfig, cleaned.audio)
+    processing = typed_section(ProcessingConfig, cleaned.processing)
+
+    text = path.read_text(encoding="utf-8") if path.is_file() else ""
+    if HAVE_ROUND_TRIP:
+        yaml = _yaml_for(text)
+        data = yaml.load(text) if text else None
+        if data is None:
+            data = {}
+        if not isinstance(data, dict):
+            data = {}
+    else:
+        yaml = None
+        data = load_raw(path)
+
+    devices = data.get("devices")
+    if devices is None:
+        devices = []
+    wanted = previous_name or cleaned.name
+    existing = next(
+        (
+            d
+            for d in devices
+            if isinstance(d, dict) and str(d.get("name", "")) == wanted
+        ),
+        None,
+    )
+    if existing is None:
+        existing = {}
+        devices.append(existing)
+
+    existing["name"] = cleaned.name
+    if match:
+        existing["match"] = match
+    else:
+        existing.pop("match", None)
+    if audio:
+        existing["audio"] = audio
+    else:
+        existing.pop("audio", None)
+    if processing:
+        existing["processing"] = processing
+    else:
+        existing.pop("processing", None)
+
+    data["devices"] = devices
+    _dump(path, data, yaml)
+
+
+def delete_device(path: Path, name: str) -> bool:
+    """Remove one device entry. False when it was not there to begin with."""
+    text = path.read_text(encoding="utf-8") if path.is_file() else ""
+    if HAVE_ROUND_TRIP:
+        yaml = _yaml_for(text)
+        data = yaml.load(text) if text else None
+        if not isinstance(data, dict):
+            return False
+    else:
+        yaml = None
+        data = load_raw(path)
+
+    devices = data.get("devices") or []
+    kept = [
+        d
+        for d in devices
+        if not (isinstance(d, dict) and str(d.get("name", "")) == name)
+    ]
+    if len(kept) == len(devices):
+        return False
+    if kept:
+        data["devices"] = kept
+    else:
+        data.pop("devices", None)
+
+    _dump(path, data, yaml)
+    return True
+
+
+def check_device_draft(draft: DeviceDraft, others: Sequence[DeviceDraft] = ()) -> str | None:
+    """What is wrong with this device draft, or None if it would load.
+
+    Runs the same value checks the file does and the same positional checks
+    check_devices makes, so the window refuses a bad value and a doomed entry
+    before it writes either.
+    """
+    from ..core import validate
+    from ..core.config import AudioConfig, ProcessingConfig, validate_device
+
+    cleaned = draft.clean()
+    if not cleaned.name:
+        return "задайте имя устройства, прежде чем сохранять"
+    try:
+        entries = [
+            validate_device(
+                entry.name,
+                rows_to_dict(entry.match),
+                typed_section(AudioConfig, entry.audio),
+                typed_section(ProcessingConfig, entry.processing),
+            )
+            for entry in [cleaned, *others]
+        ]
+    except ValueError as exc:
+        return str(exc)
+    report = validate.check_devices(entries)
+    if report.errors:
+        return str(report.errors[0])
     return None
 
 

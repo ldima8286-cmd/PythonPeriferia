@@ -334,6 +334,185 @@ class TestFormatting:
         assert '"KEY_GRAVE"' in path.read_text()
 
 
+class TestDeviceDrafts:
+    def test_empty_devices_give_no_drafts(self):
+        assert model.drafts_from_devices([]) == []
+
+    def test_a_device_becomes_a_draft(self):
+        from src.periferia.core.config import DeviceProfile
+
+        entries = [
+            DeviceProfile(
+                name="usb",
+                match={"device.bus": "usb"},
+                audio={"target_volume": 1.0},
+                processing={"mono_from": "front-right"},
+            )
+        ]
+        draft = model.drafts_from_devices(entries)[0]
+        assert draft.name == "usb"
+        assert draft.match == [("device.bus", "usb")]
+        assert draft.audio == [("target_volume", "1.0")]
+        assert draft.processing == [("mono_from", "front-right")]
+
+    def test_a_number_in_an_override_comes_back_as_text_writable_to_a_table(self):
+        from src.periferia.core.config import DeviceProfile
+
+        draft = model.draft_from_device(
+            DeviceProfile(name="usb", audio={"target_volume": 0.8})
+        )
+        assert draft.audio == [("target_volume", "0.8")]
+
+    def test_a_blank_row_stops_existing(self):
+        draft = model.DeviceDraft(
+            name="usb", match=[("device.bus", "usb"), ("node.name", "   ")]
+        )
+        assert draft.clean().match == [("device.bus", "usb")]
+
+
+def _usb_draft() -> model.DeviceDraft:
+    return model.DeviceDraft(
+        name="usb",
+        match=[("device.bus", "usb")],
+        audio=[("target_volume", "1.0")],
+    )
+
+
+class TestDeviceSaving:
+    def test_writes_the_entry(self, tmp_path):
+        from src.periferia.core.config import load
+
+        path = tmp_path / "config.yaml"
+        model.save_device(
+            path,
+            model.DeviceDraft(
+                name="usb",
+                match=[("device.bus", "usb")],
+                audio=[("target_volume", "1.0")],
+                processing=[("mono_from", "front-right")],
+            ),
+        )
+        devices = load(path).devices
+        assert len(devices) == 1
+        assert devices[0].name == "usb"
+        assert devices[0].match == {"device.bus": "usb"}
+        assert devices[0].audio == {"target_volume": 1.0}
+        assert devices[0].processing == {"mono_from": "front-right"}
+
+    def test_empty_rows_remove_the_section_but_keep_the_entry(self, tmp_path):
+        from src.periferia.core.config import load
+
+        path = tmp_path / "config.yaml"
+        model.save_device(path, _usb_draft())
+        model.save_device(path, model.DeviceDraft(name="usb", match=[("device.bus", "usb")]))
+        left = load(path).devices
+        assert len(left) == 1
+        assert left[0].match == {"device.bus": "usb"}
+        assert left[0].audio == {}
+
+    def test_other_sections_are_left_alone(self, tmp_path):
+        from src.periferia.core.config import load
+
+        path = tmp_path / "config.yaml"
+        path.write_text("audio:\n  hold_ms: 150\nptt:\n  ptt_key: KEY_GRAVE\n", encoding="utf-8")
+        model.save_device(path, _usb_draft())
+        cfg = load(path)
+        assert cfg.audio.hold_ms == 150
+        assert cfg.ptt.ptt_key == "KEY_GRAVE"
+
+    @pytest.mark.skipif(
+        not model.HAVE_ROUND_TRIP, reason="needs ruamel.yaml for comment preservation"
+    )
+    def test_comments_survive_a_save(self, tmp_path):
+        path = tmp_path / "config.yaml"
+        path.write_text(
+            "# моя настройка\nptt:\n  ptt_key: KEY_GRAVE  # е\n", encoding="utf-8"
+        )
+        model.save_device(path, _usb_draft())
+        text = path.read_text()
+        assert "# моя настройка" in text
+        assert "# е" in text
+
+    def test_a_rename_replaces_the_old_name(self, tmp_path):
+        from src.periferia.core.config import load
+
+        path = tmp_path / "config.yaml"
+        model.save_device(path, _usb_draft())
+        model.save_device(
+            path,
+            model.DeviceDraft(
+                name="headset",
+                match=[("device.bus", "usb")],
+                audio=[("target_volume", "1.0")],
+            ),
+            previous_name="usb",
+        )
+        left = load(path).devices
+        assert [d.name for d in left] == ["headset"]
+
+    def test_delete_removes_only_the_named_entry(self, tmp_path):
+        from src.periferia.core.config import load
+
+        path = tmp_path / "config.yaml"
+        model.save_device(path, _usb_draft())
+        model.save_device(
+            path,
+            model.DeviceDraft(name="fallback", audio=[("target_volume", "0.7")]),
+        )
+        assert model.delete_device(path, "usb") is True
+        assert model.delete_device(path, "usb") is False
+        assert [d.name for d in load(path).devices] == ["fallback"]
+
+
+class TestDeviceValidation:
+    def test_a_bad_override_value_is_named(self):
+        problem = model.check_device_draft(
+            model.DeviceDraft(name="usb", audio=[("target_volume", "loud")])
+        )
+        assert problem is not None
+        assert "target_volume" in problem
+
+    def test_a_duplicate_row_key_is_refused(self):
+        problem = model.check_device_draft(
+            model.DeviceDraft(
+                name="usb",
+                match=[("device.bus", "usb"), ("device.bus", "pci")],
+            )
+        )
+        assert problem is not None
+        assert "twice" in problem
+
+    def test_an_empty_name_is_refused(self):
+        problem = model.check_device_draft(model.DeviceDraft())
+        assert problem is not None
+        assert "имя" in problem
+
+    def test_a_duplicate_name_against_an_existing_entry_is_refused(self):
+        others = [
+            model.DeviceDraft(
+                name="usb", match=[("device.bus", "pci")], audio=[("target_volume", "1.0")]
+            )
+        ]
+        problem = model.check_device_draft(
+            model.DeviceDraft(
+                name="usb", match=[("device.bus", "usb")], audio=[("target_volume", "1.0")]
+            ),
+            others,
+        )
+        assert problem is not None
+        assert "twice" in problem
+
+    def test_a_clean_draft_passes(self):
+        problem = model.check_device_draft(
+            model.DeviceDraft(
+                name="usb",
+                match=[("device.bus", "usb")],
+                audio=[("target_volume", "1.0")],
+            )
+        )
+        assert problem is None
+
+
 class TestStatusAgainstRealStateConstants:
     """The daemon writes lowercase constants, so the window has to read those.
 

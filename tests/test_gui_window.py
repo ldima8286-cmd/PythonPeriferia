@@ -258,7 +258,7 @@ def test_picker_can_be_typed_into(app, tmp_path):
 def test_sidebar_lists_the_questions_in_order(app, tmp_path):
     window = MainWindow(tmp_path / "config.yaml")
     names = [window.nav.item(i).text() for i in range(window.nav.count())]
-    assert names == ["Состояние", "Профили", "Правка профиля", "Проверка"]
+    assert names == ["Состояние", "Профили", "Устройства", "Правка профиля", "Проверка"]
 
 
 def test_choosing_a_page_in_the_sidebar_shows_it(app, tmp_path):
@@ -266,7 +266,9 @@ def test_choosing_a_page_in_the_sidebar_shows_it(app, tmp_path):
     assert window.stack.currentWidget() is window.status_page
     window.nav.setCurrentRow(1)
     assert window.stack.currentWidget() is window.profiles_page
-    window.nav.setCurrentRow(3)
+    window.nav.setCurrentRow(2)
+    assert window.stack.currentWidget() is window.device_page
+    window.nav.setCurrentRow(4)
     assert window.stack.currentWidget() is window.diagnostics_page
 
 
@@ -335,7 +337,13 @@ def test_diagnostics_page_says_so_when_nothing_is_wrong(app, tmp_path):
         "      KEY_A: KEY_B\n"
         "  - name: rest\n"
         "    remap:\n"
-        "      KEY_C: KEY_D\n",
+        "      KEY_C: KEY_D\n"
+        "devices:\n"
+        "  - name: usb\n"
+        "    match:\n"
+        "      device.bus: usb\n"
+        "    audio:\n"
+        "      target_volume: 1.0\n",
     )
     assert window.diagnostics_page.list.count() == 1
     assert "Замечаний нет." in window.diagnostics_page.list.item(0).text()
@@ -400,6 +408,110 @@ def test_a_profile_can_be_renamed_and_keeps_its_keys(app, tmp_path):
     text = (tmp_path / "config.yaml").read_text()
     assert model_profile_names(tmp_path) == ["launcher"]
     assert "KEY_A: KEY_B" in text
+
+
+def test_device_editor_loads_every_entry(app, tmp_path):
+    window = _window(
+        app,
+        tmp_path,
+        "devices:\n"
+        "  - name: usb\n"
+        "    match:\n"
+        "      device.bus: usb\n"
+        "    audio:\n"
+        "      target_volume: 1.0\n"
+        "  - name: fallback\n",
+    )
+    editor = window.device_editor
+    assert editor.device.count() == 2
+    assert editor.match.rows() == [("device.bus", "usb")]
+    assert editor.audio.rows() == [("target_volume", "1.0")]
+
+
+def test_saving_a_device_writes_the_entry(app, tmp_path):
+    from src.periferia.core.config import load
+
+    window = _window(app, tmp_path, "ptt:\n  ptt_key: KEY_GRAVE\n")
+    window._new_device()
+    editor = window.device_editor
+    editor.name.setEditText("usb")
+    editor.match.set_rows([("device.bus", "usb")])
+    editor.audio.set_rows([("target_volume", "1.0"), ("attack_ms", "5")])
+    editor.processing.set_rows([("stereo_to_mono", "off")])
+    editor.save()
+
+    text = (tmp_path / "config.yaml").read_text()
+    assert "device.bus" in text
+    assert "target_volume" in text
+    device = load(tmp_path / "config.yaml").devices[0]
+    assert device.name == "usb"
+    assert device.audio == {"target_volume": 1.0, "attack_ms": 5}
+    assert device.processing == {"stereo_to_mono": False}
+
+
+def test_a_number_written_as_text_stays_a_number(app, tmp_path):
+    """The window only has text rows, so target_volume typed as "1.4" has to
+    come out of the file as the number 1.4, or the strict reader refuses it."""
+    from src.periferia.core.config import load
+
+    window = _window(app, tmp_path, "devices:\n  - name: usb\n")
+    editor = window.device_editor
+    editor.audio.set_rows([("target_volume", "1.4")])
+    editor.save()
+
+    assert load(tmp_path / "config.yaml").devices[0].audio == {"target_volume": 1.4}
+
+
+def test_saving_a_bad_override_value_is_refused(app, tmp_path):
+    window = _window(
+        app, tmp_path, "devices:\n  - name: usb\n    match:\n      device.bus: usb\n"
+    )
+    editor = window.device_editor
+    editor.audio.set_rows([("target_volume", "loud")])
+    editor.save()
+
+    assert "target_volume" in editor.warning.text()
+    assert "loud" not in (tmp_path / "config.yaml").read_text()
+
+
+def test_saving_a_renamed_device_keeps_the_other_entry(app, tmp_path):
+    window = _window(
+        app,
+        tmp_path,
+        "devices:\n"
+        "  - name: analog\n"
+        "  - name: usb\n"
+        "    match:\n"
+        "      device.bus: usb\n",
+    )
+    editor = window.device_editor
+    editor.device.setCurrentIndex(1)
+    editor._switched(1)
+    editor.name.setEditText("headset")
+    editor.save()
+
+    from src.periferia.core.config import load
+
+    assert [d.name for d in load(tmp_path / "config.yaml").devices] == ["analog", "headset"]
+
+
+def test_deleting_a_device_removes_only_it(app, tmp_path):
+    window = _window(
+        app,
+        tmp_path,
+        "devices:\n"
+        "  - name: usb\n"
+        "    match:\n"
+        "      device.bus: usb\n"
+        "  - name: fallback\n",
+    )
+    editor = window.device_editor
+    editor.set_draft(editor._drafts[1])
+    editor._delete()
+
+    from src.periferia.core.config import load
+
+    assert [d.name for d in load(tmp_path / "config.yaml").devices] == ["usb"]
 
 
 def model_profile_names(tmp_path: Path) -> list[str]:

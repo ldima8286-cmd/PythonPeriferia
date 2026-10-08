@@ -299,23 +299,30 @@ virtual source.
 
 ## The window
 
-Four things, in the order they get asked for:
+Five things, in the order they get asked for:
 
 | Page | The question it answers |
 | --- | --- |
 | Состояние | Is it working right now, and what is in the way |
 | Профили | What does this do to my keys in which window |
+| Устройства | Which capture device gets which volume and channel |
 | Правка профиля | Change one profile: which window it applies to, its keys, its pointer speed |
 | Проверка | What is wrong with what I wrote |
 
-The last page is the same checks `periferia profiles` runs, so a config can be
-inspected without starting anything.
+The last page is the same checks `periferia profiles` and `periferia config
+--check` run, so a config can be inspected without starting anything.
 
 One profile is edited at a time. Saving writes only that profile's `name`,
 `match`, `remap` and `pointer`, and leaves the rest of the file alone: comments,
 section order, unknown keys, and any macros inside the profile are all kept as
 they were. Macros are shown as a count and not edited here, because a recorded
 sequence has its own timing that a table of key presses cannot ask for.
+
+A device entry is edited the same way: its `match` rules and its `audio` and
+`processing` overrides are plain tables. A number typed in the window stays the
+number `1.5` rather than the string "1.5", and a whole entry can be deleted. As
+with profiles, only that entry is touched and everything else survives, names
+included.
 
 Every profile is editable, not just the first one, so a profile that names a
 window can be changed without hand-editing the file. Choosing another profile in
@@ -709,7 +716,8 @@ reports on this.
       its PipeWire properties, `periferia calibrate` measures which channel the
       mono stage should keep, and the daemon swaps profiles when hardware is
       plugged or unplugged
-- [x] GUI for the config: profiles only, one at a time, comments kept
+- [x] GUI for the config: one profile at a time and one device entry at a time,
+      comments kept
 - [x] input profiles: remap, turn a key off entirely, pointer speed per
       profile, and on KWin the profile follows the focused window
 - [x] strict config: every value is checked for type, range and allowed names

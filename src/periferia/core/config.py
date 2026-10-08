@@ -500,6 +500,30 @@ def match_profile(cfg: Config, props: dict[str, Any] | None) -> DeviceProfile | 
     return None
 
 
+def validate_device(
+    name: str,
+    match: dict[str, Any],
+    audio: dict[str, Any],
+    processing: dict[str, Any],
+) -> DeviceProfile:
+    """Build one device entry the way the file would, refusing what would not load.
+
+    The GUI calls this before writing an entry, so a draft that says
+    `target_volume: loud` is refused here with the key named instead of after
+    the daemon has already applied it. Returns the entry so the caller can
+    check it further, e.g. with `validate.check_devices`.
+    """
+    profile: DeviceProfile = _build(
+        DeviceProfile,
+        {"name": name, "match": match},
+        "device",
+    )
+    profile.match = profile.match or {}
+    profile.audio = _override(AudioConfig, dict(audio), "device.audio")
+    profile.processing = _override(ProcessingConfig, dict(processing), "device.processing")
+    return profile
+
+
 def effective(cfg: Config, profile: DeviceProfile | None) -> tuple[AudioConfig, ProcessingConfig]:
     """The settings in force for one device: defaults overlaid by its entry.
 

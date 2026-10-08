@@ -43,7 +43,7 @@ from ..core.config import Config, load
 from ..modules.remap import RemapError
 from . import model, pages
 
-PAGES = ("Состояние", "Профили", "Правка профиля", "Проверка")
+PAGES = ("Состояние", "Профили", "Устройства", "Правка профиля", "Проверка")
 
 log = logging.getLogger("periferia.gui")
 
@@ -158,6 +158,66 @@ class RemapEditor(QWidget):
     def _save(self) -> None:
         if self._on_change:
             self._on_change(self.current_rows())
+
+
+class RowsEditor(QWidget):
+    """A two-column text table, for the key/value rows of a device entry.
+
+    The remap editor restricts both columns to known keys. A device entry is
+    the opposite: it matches on PipeWire property names and overrides config
+    keys, neither of which is a list the window can enumerate, so both columns
+    are free text and the file's own validator that decides on save.
+    """
+
+    def __init__(self, left_header: str, right_header: str) -> None:
+        super().__init__()
+        self._suspend = False
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(4)
+
+        self.table = QTableWidget(0, 2)
+        self.table.setHorizontalHeaderLabels([left_header, right_header])
+        self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        self.table.verticalHeader().setVisible(False)
+        layout.addWidget(self.table)
+
+        buttons = QHBoxLayout()
+        self.add_button = QPushButton("Добавить")
+        self.add_button.clicked.connect(self._add)
+        self.remove_button = QPushButton("Удалить")
+        self.remove_button.clicked.connect(self._remove)
+        buttons.addWidget(self.add_button)
+        buttons.addWidget(self.remove_button)
+        buttons.addStretch()
+        layout.addLayout(buttons)
+
+    def set_rows(self, rows: list[model.Row]) -> None:
+        self._suspend = True
+        self.table.setRowCount(len(rows))
+        for row, (key, value) in enumerate(rows):
+            self.table.setItem(row, 0, QTableWidgetItem(key))
+            self.table.setItem(row, 1, QTableWidgetItem(value))
+        self._suspend = False
+
+    def rows(self) -> list[model.Row]:
+        out: list[model.Row] = []
+        for row in range(self.table.rowCount()):
+            left = self.table.item(row, 0)
+            right = self.table.item(row, 1)
+            if left is not None and right is not None:
+                out.append((left.text(), right.text()))
+        return out
+
+    def _add(self) -> None:
+        self.set_rows([*self.rows(), ("", "")])
+
+    def _remove(self) -> None:
+        row = self.table.currentRow()
+        if row < 0:
+            return
+        self.set_rows([r for i, r in enumerate(self.rows()) if i != row])
 
 
 class ProfileEditor(QWidget):
@@ -346,6 +406,147 @@ class ProfileEditor(QWidget):
             self._on_delete(self._original)
 
 
+class DeviceEditor(QWidget):
+    """One device entry: which card it matches, and the settings that follow it.
+
+    A match rule is a property the card carries, which nobody can type from
+    memory, so `periferia props` on the terminal is the reminder column here:
+    it prints the exact property=value pairs a device has. Editing is free text
+    and the file's own validator decides on save, with the rule named.
+    """
+
+    def __init__(
+        self,
+        on_save: Callable[[model.DeviceDraft, str | None], None] | None = None,
+        on_delete: Callable[[str], None] | None = None,
+        on_new: Callable[[], None] | None = None,
+    ) -> None:
+        super().__init__()
+        self._on_save = on_save
+        self._on_delete = on_delete
+        self._on_new = on_new
+        self._original: str | None = None
+        self._loading = False
+        self._drafts: list[model.DeviceDraft] = []
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(10)
+
+        picker = QHBoxLayout()
+        self.device = QComboBox()
+        self.device.currentIndexChanged.connect(self._switched)
+        new_button = QPushButton("Новое")
+        new_button.clicked.connect(self._new)
+        picker.addWidget(QLabel("Устройство"))
+        picker.addWidget(self.device, 1)
+        picker.addWidget(new_button)
+        layout.addLayout(picker)
+
+        self.name = QComboBox()
+        self.name.setEditable(True)
+        self.name.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
+        layout.addWidget(self.name)
+
+        heading = QLabel("Совпадает с картой (правил может быть несколько, все должны совпасть)")
+        heading.setStyleSheet(pages.NOTE_STYLE)
+        layout.addWidget(heading)
+        self.match = RowsEditor("Свойство", "Значение")
+        layout.addWidget(self.match)
+
+        headings = QHBoxLayout()
+        heading_a = QLabel("audio:")
+        heading_a.setStyleSheet(pages.NOTE_STYLE)
+        heading_p = QLabel("processing:")
+        heading_p.setStyleSheet(pages.NOTE_STYLE)
+        headings.addWidget(heading_a)
+        headings.addStretch()
+        headings.addWidget(heading_p)
+        layout.addLayout(headings)
+
+        sections = QHBoxLayout()
+        self.audio = RowsEditor("Параметр", "Значение")
+        self.processing = RowsEditor("Параметр", "Значение")
+        sections.addWidget(self.audio)
+        sections.addWidget(self.processing)
+        layout.addLayout(sections)
+
+        row = QHBoxLayout()
+        self.delete_button = QPushButton("Удалить устройство")
+        self.delete_button.clicked.connect(self._delete)
+        self.save_button = QPushButton("Сохранить устройство")
+        self.save_button.clicked.connect(self.save)
+        row.addWidget(self.delete_button)
+        row.addStretch()
+        row.addWidget(self.save_button)
+        layout.addLayout(row)
+
+        self.warning = QLabel()
+        self.warning.setWordWrap(True)
+        self.warning.setStyleSheet("color: #b26a00;")
+        layout.addWidget(self.warning)
+
+    def set_devices(self, drafts: list[model.DeviceDraft]) -> None:
+        self._drafts = list(drafts)
+        self._loading = True
+        self.device.blockSignals(True)
+        self.device.clear()
+        for draft in drafts:
+            self.device.addItem(draft.name or "без имени", draft.name)
+        self.device.blockSignals(False)
+        self._loading = False
+        if drafts:
+            self.device.setCurrentIndex(0)
+            self.set_draft(drafts[0])
+        else:
+            self.set_draft(None)
+
+    def set_draft(self, draft: model.DeviceDraft | None) -> None:
+        self._loading = True
+        self.match.set_rows(list(draft.match) if draft else [])
+        self.audio.set_rows(list(draft.audio) if draft else [])
+        self.processing.set_rows(list(draft.processing) if draft else [])
+        self.name.blockSignals(True)
+        self.name.clear()
+        if draft:
+            self.name.addItem(draft.name)
+            self.name.setCurrentIndex(0)
+        self.name.blockSignals(False)
+        self.delete_button.setEnabled(draft is not None)
+        self.save_button.setEnabled(draft is not None)
+        self._original = draft.name if draft else None
+        self._loading = False
+
+    def current_draft(self) -> model.DeviceDraft:
+        return model.DeviceDraft(
+            name=str(self.name.currentText()).strip(),
+            match=self.match.rows(),
+            audio=self.audio.rows(),
+            processing=self.processing.rows(),
+        )
+
+    def save(self) -> None:
+        if self._on_save:
+            self._on_save(self.current_draft(), self._original)
+
+    def _switched(self, index: int) -> None:
+        if self._loading or index < 0:
+            return
+        wanted = str(self.device.itemData(index) or "")
+        for draft in self._drafts:
+            if draft.name == wanted:
+                self.set_draft(draft)
+                return
+
+    def _new(self) -> None:
+        if self._on_new:
+            self._on_new()
+
+    def _delete(self) -> None:
+        if self._on_delete and self._original:
+            self._on_delete(self._original)
+
+
 def _field() -> QLineEdit:
     """A free-typed text box for one match criterion.
 
@@ -397,11 +598,13 @@ class MainWindow(QMainWindow):
         self.stack = QStackedWidget()
         self.status_page = pages.StatusPage()
         self.profiles_page = pages.ProfilesPage()
+        self.device_page = self._build_devices_page()
         self.keys_page = self._build_keys_page()
         self.diagnostics_page = pages.DiagnosticsPage()
         for page in (
             self.status_page,
             self.profiles_page,
+            self.device_page,
             self.keys_page,
             self.diagnostics_page,
         ):
@@ -450,8 +653,38 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.editor, 1)
         return page
 
+    def _build_devices_page(self) -> QWidget:
+        """A device entry is a card your capture hardware wears. This edits the
+        registry of them: which settings go with which card, decided by the
+        properties `periferia props` prints for the card in front of you.
+        """
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(12)
+        heading = QLabel("Устройства")
+        heading.setStyleSheet(pages.TITLE_STYLE)
+        layout.addWidget(heading)
+        note = QLabel(
+            "Свойства карты, на которые можно совпадать: `periferia props` показывает "
+            "их для микрофона на этой машине, а `periferia sources` — какая запись "
+            "устройству достанется. Запись без правил совпадает с любой картой — это "
+            "запасная, ей место последней."
+        )
+        note.setWordWrap(True)
+        note.setStyleSheet(pages.NOTE_STYLE)
+        layout.addWidget(note)
+        self.device_editor = DeviceEditor(
+            on_save=self._save_device,
+            on_delete=self._delete_device,
+            on_new=self._new_device,
+        )
+        layout.addWidget(self.device_editor, 1)
+        return page
+
     def _load(self) -> None:
         self.editor.set_profiles(model.drafts_from_config(self._cfg.profiles))
+        self.device_editor.set_devices(model.drafts_from_devices(self._cfg.devices))
 
     def _new_profile(self) -> None:
         """An unsaved profile, held in the editor until it is saved.
@@ -506,6 +739,48 @@ class MainWindow(QMainWindow):
             self._load()
             self._recheck()
             self.statusBar().showMessage(f"Профиль {name} удалён.", 4000)
+
+    def _new_device(self) -> None:
+        """An unsaved device entry, held in the editor until it is saved."""
+        draft = model.DeviceDraft(name="новое устройство")
+        self.device_editor.set_draft(draft)
+        self.device_editor.warning.setText(
+            "Новое устройство. Задайте имя и правила, затем «Сохранить устройство»."
+        )
+
+    def _save_device(self, draft: model.DeviceDraft, previous: str | None) -> None:
+        others = [
+            d
+            for d in model.drafts_from_devices(self._cfg.devices)
+            if d.name != previous
+        ]
+        problem = model.check_device_draft(draft, others)
+        if problem is not None:
+            self.device_editor.warning.setText(problem)
+            return
+        try:
+            model.save_device(self._config_path, draft, previous)
+        except (OSError, ValueError) as exc:
+            self.statusBar().showMessage(f"Не сохранено: {exc}", 6000)
+            return
+        self._cfg = _load_or_default(self._config_path)
+        self._load()
+        self._recheck()
+        self.statusBar().showMessage(
+            "Сохранено. Демон применит при следующем переключении устройства.", 4000
+        )
+
+    def _delete_device(self, name: str) -> None:
+        try:
+            removed = model.delete_device(self._config_path, name)
+        except OSError as exc:
+            self.statusBar().showMessage(f"Не удалено: {exc}", 6000)
+            return
+        if removed:
+            self._cfg = _load_or_default(self._config_path)
+            self._load()
+            self._recheck()
+            self.statusBar().showMessage(f"Устройство {name} удалено.", 4000)
 
     def _refresh(self) -> None:
         self.status_page.refresh(self._cfg)

@@ -136,16 +136,21 @@ class DiagnosticsPage(QWidget):
 
     def refresh(self, cfg: Any) -> None:
         self.list.clear()
-        report = validate.check_profiles(
-            cfg.profiles,
-            reserved=[cfg.ptt.ptt_key, cfg.ptt.panic_key],
-        )
-        if not report.problems:
+        reports = [
+            validate.check_profiles(
+                cfg.profiles,
+                reserved=[cfg.ptt.ptt_key, cfg.ptt.panic_key],
+            ),
+            validate.check_macros(cfg.macros, cfg.profiles),
+            validate.check_devices(cfg.devices),
+        ]
+        problems = [problem for report in reports for problem in report.problems]
+        if not problems:
             item = QListWidgetItem("Замечаний нет.")
             item.setForeground(_colour(GOOD))
             self.list.addItem(item)
             return
-        for problem in report.problems:
+        for problem in problems:
             colour = BAD if problem.level == validate.ERROR else WARN
             item = QListWidgetItem(f"{problem.level}: {problem.where}\n{problem.message}")
             item.setForeground(_colour(colour))

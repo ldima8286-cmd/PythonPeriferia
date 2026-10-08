@@ -198,7 +198,10 @@ reads the keyboard, it never grabs it, so your typing keeps working normally.
 | command | what it does |
 | --- | --- |
 | `periferia check` | verify the environment, prints what is missing |
-| `periferia sources` | list sources, marks the physical one |
+| `periferia sources` | list sources, marks the physical one and its profile |
+| `periferia props` | print the properties one device carries, for a `devices:` match |
+| `periferia device` | show the capture device in use and the profile governing it |
+| `periferia calibrate` | measure a card and print the `devices:` entry it wants |
 | `periferia graph` | show the PipeWire graph the way cleanup reads it |
 | `periferia devices` | list input devices that look like keyboards |
 | `periferia pick-key` | press a key, get the yaml value for it |
@@ -264,10 +267,19 @@ devices:
 
 A rule is "this property of the device has this exact value". Every source
 carries the vocabulary, and `periferia props` prints what the physical mic has
-to match against. `periferia sources` shows which entry each device would get.
-An entry with no `match` applies to any device, which makes it the fallback;
-put it last. `device.bus: usb` above is just an example - on a machine where
-the only microphone is a USB one, tune the fallback instead.
+to match against. `periferia sources` shows which entry each device would get,
+and `periferia device` says which one is driving the microphone right now. An
+entry with no `match` applies to any device, which makes it the fallback; put
+it last. `device.bus: usb` above is just an example - on a machine where the
+only microphone is a USB one, tune the fallback instead.
+
+The daemon re-reads the capture device every few seconds and rebuilds the chain
+when the hardware changes: a USB dongle unplugged, a headset plugged into the
+jack, a card whose ALSA profile toggled. Each plug gets its own profile's
+numbers, and a microphone that was open through the swap stays open on the new
+device. Everyday churn (volume, mute, the description) never counts as a change,
+so a level tweak does not cost you the connection applications hold to the
+virtual source.
 
 ## The window
 
@@ -677,6 +689,10 @@ reports on this.
 
 - [x] stereo to mono: the two channels really differ (measured), so the
       virtual microphone publishes one mono channel carried by the left channel
+- [x] settings that follow a device: a `devices:` registry matches a card by
+      its PipeWire properties, `periferia calibrate` measures which channel the
+      mono stage should keep, and the daemon swaps profiles when hardware is
+      plugged or unplugged
 - [x] GUI for the config: profiles only, one at a time, comments kept
 - [x] input profiles: remap, turn a key off entirely, pointer speed per
       profile, and on KWin the profile follows the focused window

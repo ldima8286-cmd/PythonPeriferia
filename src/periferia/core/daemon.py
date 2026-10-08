@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import signal
 import sys
@@ -20,7 +21,7 @@ from ..core import kwinconfig as kwinconfig_mod
 from ..core import pipewire as pipewire_mod
 from ..core import windowprofile as windowprofile_mod
 from ..core import windowwatch as windowwatch_mod
-from ..modules.audio import VirtualMic
+from ..modules.audio import VirtualMic, pick_physical_source
 from ..modules.hotkey import (
     HotkeyListener,
     find_keyboards_detailed,
@@ -39,6 +40,44 @@ from . import watcher as watcher_mod
 from .macro import Macro, bindings, effective
 
 log = logging.getLogger(__name__)
+
+# How often the main loop re-reads the capture device. pactl answers in
+# milliseconds, so asking every five seconds costs nothing, and a USB dongle
+# that is only being seated does not get a rebuild storm.
+DEVICE_POLL_S = 5.0
+
+# The properties that say what a capture device is, for change detection.
+# Volume, mute and the description churn with use, so they stay out; a device
+# that only changed its level is still the same device.
+WATCH_KEYS = (
+    "device.bus",
+    "device.form_factor",
+    "audio.channels",
+    "audio.rate",
+    "device.vendor.id",
+    "device.product.id",
+    "device.vendor.name",
+    "device.product.name",
+    "alsa.card_name",
+    "alsa.mixer_name",
+)
+
+
+def device_identity(physical: str) -> tuple[str, str]:
+    """A stable name for a capture device, from the properties that say what it is.
+
+    The source name alone is not enough: an ALSA profile toggles the node behind
+    the same name, and the earphone jack and the mic jack are different capture
+    devices that can report the same node name. Only matchable, hardware-ish
+    properties count, so everyday churn (volume, mute, description) never marks
+    the device as changed while the chain keeps it.
+    """
+    props = pipewire_mod.source_props(physical)
+    tag = json.dumps(
+        {key: str(props.get(key, "")) for key in sorted(WATCH_KEYS)},
+        sort_keys=True,
+    )
+    return (physical, tag)
 
 
 def _remapping(listener: HotkeyListener | KeyboardRouter) -> bool:
@@ -130,6 +169,19 @@ class Daemon:
         # from the listener thread, read from anywhere.
         self._events: deque[tuple[float, str]] = deque(maxlen=64)
         self._events_lock = threading.Lock()
+        # The capture device the chain was built from, or None when the chain
+        # is in doubt. The pair (name, identity) is what the watch loop compares
+        # against; the identity half lets a profile switch on the same card be
+        # seen as a change while a volume tweak is not. None means "rebuild",
+        # which is why a failed build or a device leaving clears it.
+        self._device_identity: tuple[str, str] | None = None
+        # Whether the chain is up at all. The watch switches a live chain onto
+        # the device that is present; with no chain there is nothing to watch.
+        self._device_watch = False
+        # Set when the last build failed, so the watch keeps retrying the same
+        # device every poll instead of treating the failure as a settled state.
+        self._device_failed = False
+        self._device_checked_at: float = 0.0
 
     def load_macros(self) -> int:
         """Resolve the macros this config binds to keys. Returns how many are
@@ -501,10 +553,82 @@ class Daemon:
         profile = config_mod.match_profile(self.cfg, pipewire_mod.source_props(physical))
         if profile is not None:
             log.info("device profile %r applies to %s", profile.name or "(unnamed)", physical)
+        self._device_identity = device_identity(physical)
         audio_cfg, processing_cfg = config_mod.effective(self.cfg, profile)
         self.mic.configure(audio_cfg)
         self.processing.configure(processing_cfg)
         return self.processing.start(physical, name=audio_cfg.virtual_name)
+
+    def _swap_for_device(self) -> None:
+        """Give the chain to the capture device that is present right now.
+
+        The chain is bound to one physical source by name. When that source
+        stops resolving and another takes its place (a USB dongle unplugged,
+        a headset plugged into the jack the desktop keeps open) nothing
+        rebuilds unless someone is looking: the gate only notices when the
+        *virtual* name disappears, which everyday use never triggers. So the
+        main loop asks PipeWire directly now and then and rebuilds the chain
+        under the new device when the answer changed.
+        """
+        if not self._device_watch:
+            return
+        if time.monotonic() - self._device_checked_at < DEVICE_POLL_S:
+            return
+        self._device_checked_at = time.monotonic()
+        try:
+            physical = pick_physical_source(self.cfg.audio.physical_source)
+        except pipewire_mod.PipeWireError as exc:
+            log.debug("cannot list capture devices: %s", exc)
+            return
+        if not physical:
+            # Nothing to build onto yet. The chain keeps its last node, and the
+            # undetermined identity makes sure the return of the device rebuilds
+            # it rather than being mistaken for the same device that never left.
+            if self._device_identity is not None:
+                log.warning("no capture device right now, keeping the last chain up")
+            self._device_identity = None
+            self._device_failed = True
+            return
+        try:
+            identity = device_identity(physical)
+        except pipewire_mod.PipeWireError:
+            return
+        if not self._device_failed and identity == self._device_identity:
+            return
+        self._rebuild_for(physical)
+
+    def _rebuild_for(self, physical: str) -> None:
+        """Stop the chain for the device that left and start it for the new one."""
+        was_open = self.mic.is_open
+        old = self._device_identity[0] if self._device_identity is not None else "nothing"
+        log.info("capture device changed: %s -> %s", old, physical)
+        self._record("device:" + physical)
+        # Drop any ramp in flight before the module behind it is unloaded, so
+        # no write lands on a name that is about to stop resolving.
+        self.mic.force_silence()
+        self.processing.stop()
+        virtual = self._use_device(physical)
+        if not virtual:
+            # _use_device claimed the identity for the new device; unclaim it
+            # and mark the failure, so the next poll retries the build.
+            log.error("could not rebuild the chain for %s; PTT is not working", physical)
+            self._device_identity = None
+            self._device_failed = True
+            return
+        if not self.mic.attach(virtual):
+            log.error("could not attach the gate to %s", virtual)
+            self.processing.stop()
+            self._device_identity = None
+            self._device_failed = True
+            return
+        self._device_failed = False
+        state_mod.write(state_mod.CLOSED, source=self.mic.source)
+        if was_open:
+            # A key held through the plug must keep talking. attach() gates to
+            # silence, so the open has to be replayed on the new source.
+            log.info("the microphone was open, reopening it on %s", virtual)
+            self.mic.open_mic()
+            state_mod.write(state_mod.OPEN, source=self.mic.source)
 
     def _rebuild_source(self) -> str | None:
         """Load the echo-cancel module again and hand back the new source name.
@@ -571,6 +695,9 @@ class Daemon:
             self.processing.stop()
             return False
 
+        # The chain is up: the watch can switch it onto whatever device the
+        # hardware has next. A chain that never came up has nothing to switch.
+        self._device_watch = True
         if self.cfg.audio.start_muted:
             self.mic.force_silence()
         state_mod.write(state_mod.CLOSED, source=self.mic.source)
@@ -878,6 +1005,7 @@ class Daemon:
                 self._expire_hold()
                 self._expire_stuck_hold()
                 self._follow_window()
+                self._swap_for_device()
                 if self._config_watcher is not None:
                     self._config_watcher.check()
         except KeyboardInterrupt:

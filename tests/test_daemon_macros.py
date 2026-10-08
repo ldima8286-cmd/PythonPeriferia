@@ -151,6 +151,10 @@ def _make(
     d._stop = threading.Event()
     d._events = []
     d._events_lock = threading.Lock()
+    d._device_identity = None
+    d._device_watch = False
+    d._device_failed = False
+    d._device_checked_at = 0.0
     d.state_mod = _Stub()  # type: ignore[attr-defined]
     return d
 

@@ -543,6 +543,35 @@ def cmd_list_sources(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_device(args: argparse.Namespace) -> int:
+    """Show the capture device the config would use, and the profile for it.
+
+    The daemon switches to a device the moment its node appears, so what this
+    prints is what PTT will be driving. Reading it live keeps the answer true
+    even when the daemon is not running: the config decides the device, and
+    the decision is visible without a daemon.
+    """
+    cfg = config_mod.load(args.config)
+    physical = audio_mod.pick_physical_source(cfg.audio.physical_source)
+    if not physical:
+        print("no physical capture source found", file=sys.stderr)
+        return 1
+    props = pipewire.source_props(physical)
+    profile = config_mod.match_profile(cfg, props)
+    print(f"physical:  {physical}")
+    print(f"profile:   {profile.name if profile else '(none)'}")
+
+    note = state_mod.read()
+    held = note.get("source") if note else None
+    if held and pipewire.source_exists(held):
+        print(f"daemon:    using {held}")
+    elif note is None or not state_mod.is_running(note):
+        print("daemon:    not running")
+    else:
+        print("daemon:    holding a stale source")
+    return 0
+
+
 def cmd_source_props(args: argparse.Namespace) -> int:
     """Print what a device carries, the vocabulary a `devices:` match uses."""
     cfg = config_mod.load(args.config)
@@ -824,6 +853,15 @@ def cmd_status(args: argparse.Namespace) -> int:
     print(f"microphone {_c(word, colour)}{ago}")
     print(f"source        {note.get('source') or 'unknown'}")
     print(f"daemon pid    {note.get('pid', '?')}")
+
+    # The device PTT is driving is live PipeWire truth, not a note: read it
+    # here so 'status' shows what the daemon would pick right now.
+    cfg = config_mod.load(args.config)
+    physical = audio_mod.pick_physical_source(cfg.audio.physical_source)
+    if physical:
+        profile = config_mod.match_profile(cfg, pipewire.source_props(physical))
+        print(f"physical     {physical}")
+        print(f"profile      {profile.name if profile else '(none)'}")
     return 0
 
 
@@ -978,6 +1016,11 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("props", help="show the properties a source matches against")
     p.add_argument("name", nargs="?", help="source name; without one, the physical mic")
     p.set_defaults(func=cmd_source_props)
+    p = sub.add_parser(
+        "device",
+        help="show the capture device in use and the profile that governs it",
+    )
+    p.set_defaults(func=cmd_device)
     p = sub.add_parser(
         "calibrate",
         help="measure which channel the mono stage should keep",

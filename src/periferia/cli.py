@@ -903,6 +903,8 @@ def cmd_ramp(args: argparse.Namespace) -> int:
 
 
 def cmd_config(args: argparse.Namespace) -> int:
+    if args.check:
+        return _config_check(args)
     if args.json:
         print(json.dumps(config_mod.load(args.config).to_dict(), indent=2, ensure_ascii=False))
         return 0
@@ -922,6 +924,38 @@ def cmd_config(args: argparse.Namespace) -> int:
             continue
         for key, value in values.items():
             print(f"  {key} = {value!r}")
+    return 0
+
+
+def _config_check(args: argparse.Namespace) -> int:
+    """`periferia config --check`: reject a broken config up front.
+
+    The structural reading is load() itself: a value of the wrong shape is a
+    `ValueError` with the key named, which is exactly where a typo like
+    `attack_ms: 'fast'` should die. Once the config parses, the semantic
+    reports on top of it list the mistakes that a parser cannot see -- a
+    profile that can never fire, a macro that plays its own trigger, a device
+    entry that can never win.
+    """
+    try:
+        cfg = config_mod.load(args.config)
+    except (OSError, ValueError) as exc:
+        print(f"config is invalid: {exc}", file=sys.stderr)
+        return 1
+
+    reports = [
+        ("profiles", validate.check_profiles(cfg.profiles)),
+        ("macros", validate.check_macros(cfg.macros, cfg.profiles)),
+        ("devices", validate.check_devices(cfg.devices)),
+    ]
+    problems = [problem for _section, report in reports for problem in report.problems]
+    for _section, report in reports:
+        for problem in report.problems:
+            print(problem)
+    if problems:
+        print(f"\n{len(problems)} problem(s) found", file=sys.stderr)
+        return 1
+    print("config is readable and every check passed")
     return 0
 
 def cmd_init(args: argparse.Namespace) -> int:
@@ -1132,6 +1166,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("config", help="show the effective config")
     p.add_argument("--json", action="store_true")
+    p.add_argument(
+        "--check",
+        action="store_true",
+        help="say what is wrong before the daemon obeys it; exits non-zero on errors",
+    )
     p.set_defaults(func=cmd_config)
 
     p = sub.add_parser("install-service", help="install the systemd user unit")

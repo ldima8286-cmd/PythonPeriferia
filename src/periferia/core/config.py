@@ -234,17 +234,157 @@ class Config:
         }
 
 
-def _build(cls: type, data: Any) -> Any:
+@dataclasses.dataclass(frozen=True, slots=True)
+class _Rule:
+    """What one config value is allowed to be.
+
+    A schema is only worth having if a bad value fails where it is read, with
+    the key named, instead of inside a timing loop at 2 a.m. These rules say
+    the shape a value may take; the dataclasses say which keys exist, and the
+    two together refuse every mistake a config can carry.
+    """
+
+    kind: str
+    minimum: float | None = None
+    enum: tuple[str, ...] = ()
+
+
+_RULES: dict[type, dict[str, _Rule]] = {
+    AudioConfig: {
+        "physical_source": _Rule("string"),
+        "virtual_name": _Rule("string"),
+        "attack_ms": _Rule("int", minimum=0),
+        "release_ms": _Rule("int", minimum=0),
+        "hold_ms": _Rule("int", minimum=0),
+        "curve": _Rule("enum", enum=("exp", "linear", "s_curve")),
+        "target_volume": _Rule("number", minimum=0),
+        "start_muted": _Rule("bool"),
+        "enabled": _Rule("bool"),
+    },
+    PttConfig: {
+        "ptt_key": _Rule("string"),
+        "panic_key": _Rule("string"),
+        "device": _Rule("string"),
+        "ignore_repeat": _Rule("bool"),
+        "latch_ms": _Rule("int", minimum=0),
+        "max_press_ms": _Rule("int", minimum=0),
+        "enabled": _Rule("bool"),
+    },
+    ProcessingConfig: {
+        "noise_suppression": _Rule("bool"),
+        "echo_cancellation": _Rule("bool"),
+        "voice_detect": _Rule("bool"),
+        "tail_length_ms": _Rule("int", minimum=0),
+        "extra_props": _Rule("map_strings"),
+        "stereo_to_mono": _Rule("bool"),
+        "mono_from": _Rule("string"),
+        "enabled": _Rule("bool"),
+    },
+    LogConfig: {
+        "level": _Rule("enum", enum=("debug", "info", "warning", "error")),
+        "file": _Rule("string_or_none"),
+        "enabled": _Rule("bool"),
+    },
+    DeviceProfile: {
+        "name": _Rule("string"),
+        "enabled": _Rule("bool"),
+        "match": _Rule("map_strings"),
+    },
+    ProfileConfig: {
+        "name": _Rule("string"),
+        "enabled": _Rule("bool"),
+        "match": _Rule("map_string_or_list"),
+        "remap": _Rule("map_strings"),
+    },
+    PointerConfig: {
+        "speed": _Rule("number_or_none"),
+    },
+    MacroConfig: {
+        "name": _Rule("string"),
+        "bind": _Rule("string"),
+        "enabled": _Rule("bool"),
+    },
+    MacroStep: {
+        "key": _Rule("string"),
+        "at_ms": _Rule("int_or_none", minimum=0),
+        "gap_ms": _Rule("int", minimum=0),
+        "hold_ms": _Rule("int", minimum=0),
+    },
+}
+
+
+def _check_value(value: Any, rule: _Rule, where: str) -> None:
+    if rule.kind.endswith("_or_none") and value is None:
+        return
+    if rule.kind in ("int", "int_or_none"):
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise ValueError(f"{where}: expected a whole number, got {value!r}")
+    elif rule.kind in ("number", "number_or_none"):
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise ValueError(f"{where}: expected a number, got {value!r}")
+    elif rule.kind == "bool":
+        if not isinstance(value, bool):
+            raise ValueError(f"{where}: expected true or false, got {value!r}")
+    elif rule.kind == "enum":
+        if not isinstance(value, str) or value not in rule.enum:
+            expected = ", ".join(rule.enum)
+            raise ValueError(f"{where}: expected one of {expected}, got {value!r}")
+    elif rule.kind in ("string", "string_or_none"):
+        if not isinstance(value, str):
+            raise ValueError(f"{where}: expected text, got {value!r}")
+    elif rule.kind in ("map_strings", "map_string_or_list"):
+        if value is None:
+            return
+        if not isinstance(value, dict):
+            raise ValueError(f"{where}: expected a mapping, got {value!r}")
+        for key, item in value.items():
+            if rule.kind == "map_strings":
+                if not isinstance(item, str):
+                    raise ValueError(f"{where}.{key}: expected text, got {item!r}")
+            elif isinstance(item, list):
+                if not all(isinstance(x, str) for x in item):
+                    raise ValueError(f"{where}.{key}: expected text or a list"
+                                     f" of text, got {item!r}")
+            elif not isinstance(item, str):
+                raise ValueError(f"{where}.{key}: expected text or a list"
+                                 f" of text, got {item!r}")
+    if (
+        rule.minimum is not None
+        and not isinstance(value, bool)
+        and isinstance(value, (int, float))
+        and value < rule.minimum
+    ):
+        raise ValueError(f"{where}: must not be negative")
+
+
+def _check(cls: type, data: dict[str, Any], where: str) -> None:
+    """Refuse values that are the right key and the wrong kind of thing.
+
+    The shape a value may take is declared in `_RULES`; why the shape matters
+    is answered by the failing message naming the key. A section is checked
+    only for the keys that are actually written, so the defaults never need
+    defending.
+    """
+    for key, value in data.items():
+        rule = _RULES.get(cls, {}).get(key)
+        if rule is not None:
+            _check_value(value, rule, f"{where}.{key}")
+
+
+def _build(cls: type, data: Any, where: str = "") -> Any:
     if data is None:
         return cls()
     if not isinstance(data, dict):
-        raise ValueError(f"expected a mapping for {cls.__name__}, got {type(data).__name__}")
+        message = f"expected a mapping for {cls.__name__}, got {type(data).__name__}"
+        raise ValueError(f"{where}: {message}" if where else message)
 
     fields = {f.name for f in dataclasses.fields(cls)}
     known = {k: v for k, v in data.items() if k in fields}
     unknown = set(data) - fields
     if unknown:
-        raise ValueError(f"unknown keys in {cls.__name__}: {sorted(unknown)}")
+        message = f"unknown keys in {cls.__name__}: {sorted(unknown)}"
+        raise ValueError(f"{where}: {message}" if where else message)
+    _check(cls, known, where or cls.__name__)
     return cls(**known)
 
 
@@ -265,7 +405,8 @@ def _build_macros(data: Any, where: str) -> list[MacroConfig]:
         if not isinstance(steps, list):
             raise ValueError(f"{where}[{index}].steps: expected a list")
         macro.steps = [
-            _build(MacroStep, step) for step in steps
+            _build(MacroStep, step, where=f"{where}[{index}].steps[{step_index}]")
+            for step_index, step in enumerate(steps)
         ]
         out.append(macro)
     return out
@@ -283,6 +424,8 @@ def _build_profiles(data: Any) -> list[ProfileConfig]:
         except ValueError as exc:
             raise ValueError(f"profiles[{index}]: {exc}") from None
         if isinstance(item, dict):
+            out[-1].match = out[-1].match or {}
+            out[-1].remap = out[-1].remap or {}
             out[-1].macros = _build_macros(item.get("macros"), f"profiles[{index}].macros")
             pointer = item.get("pointer")
             if pointer is not None:
@@ -306,6 +449,7 @@ def _override(cls: type, data: Any, where: str) -> dict[str, Any]:
     unknown = set(data) - {f.name for f in dataclasses.fields(cls)}
     if unknown:
         raise ValueError(f"{where}: unknown keys: {sorted(unknown)}")
+    _check(cls, data, where)
     return dict(data)
 
 
@@ -323,6 +467,7 @@ def _build_devices(data: Any) -> list[DeviceProfile]:
             device = _build(DeviceProfile, item)
         except ValueError as exc:
             raise ValueError(f"{where}: {exc}") from None
+        device.match = device.match or {}
         device.audio = _override(AudioConfig, item.get("audio") or {}, f"{where}.audio")
         device.processing = _override(
             ProcessingConfig, item.get("processing") or {}, f"{where}.processing"
@@ -399,11 +544,11 @@ def load(explicit: str | Path | None = None) -> Config:
         raise ValueError(f"{path}: top level must be a mapping")
 
     return Config(
-        audio=_build(AudioConfig, data.get("audio")),
-        ptt=_build(PttConfig, data.get("ptt")),
-        processing=_build(ProcessingConfig, data.get("processing")),
+        audio=_build(AudioConfig, data.get("audio"), "audio"),
+        ptt=_build(PttConfig, data.get("ptt"), "ptt"),
+        processing=_build(ProcessingConfig, data.get("processing"), "processing"),
         macros=_build_macros(data.get("macros"), "macros"),
-        log=_build(LogConfig, data.get("log")),
+        log=_build(LogConfig, data.get("log"), "log"),
         profiles=_build_profiles(data.get("profiles")),
         devices=_build_devices(data.get("devices")),
         path=path,

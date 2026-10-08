@@ -59,6 +59,142 @@ def test_curve_names_are_known() -> None:
     assert config_mod.AudioConfig().curve in valid
 
 
+class TestValidation:
+    def test_wrong_type_is_named_and_rejected(self, tmp_path):
+        path = tmp_path / "config.yaml"
+        path.write_text("audio:\n  attack_ms: fast\n", encoding="utf-8")
+        with pytest.raises(ValueError, match=r"audio\.attack_ms: expected a whole number"):
+            config_mod.load(path)
+
+    def test_a_string_does_not_pass_for_a_number(self, tmp_path):
+        path = tmp_path / "config.yaml"
+        path.write_text("audio:\n  target_volume: loud\n", encoding="utf-8")
+        with pytest.raises(ValueError, match=r"audio\.target_volume: expected a number"):
+            config_mod.load(path)
+
+    def test_a_number_does_not_pass_for_text(self, tmp_path):
+        path = tmp_path / "config.yaml"
+        path.write_text("ptt:\n  ptt_key: 12\n", encoding="utf-8")
+        with pytest.raises(ValueError, match=r"ptt\.ptt_key: expected text"):
+            config_mod.load(path)
+
+    def test_a_string_does_not_pass_for_a_boolean(self, tmp_path):
+        path = tmp_path / "config.yaml"
+        path.write_text("audio:\n  enabled: 'true'\n", encoding="utf-8")
+        with pytest.raises(ValueError, match=r"audio\.enabled: expected true or false"):
+            config_mod.load(path)
+
+    def test_negative_time_is_rejected(self, tmp_path):
+        path = tmp_path / "config.yaml"
+        path.write_text("audio:\n  hold_ms: -5\n", encoding="utf-8")
+        with pytest.raises(ValueError, match=r"audio\.hold_ms: must not be negative"):
+            config_mod.load(path)
+
+    def test_unknown_curve_name_is_rejected(self, tmp_path):
+        path = tmp_path / "config.yaml"
+        path.write_text("audio:\n  curve: straight\n", encoding="utf-8")
+        with pytest.raises(ValueError, match=r"audio\.curve: expected one of exp, linear, s_curve"):
+            config_mod.load(path)
+
+    def test_unknown_log_level_is_rejected(self, tmp_path):
+        path = tmp_path / "config.yaml"
+        path.write_text("log:\n  level: chatty\n", encoding="utf-8")
+        with pytest.raises(ValueError, match=r"log\.level: expected one of"):
+            config_mod.load(path)
+
+    def test_extra_props_values_must_be_text(self, tmp_path):
+        path = tmp_path / "config.yaml"
+        path.write_text("processing:\n  extra_props:\n    node.name: null\n", encoding="utf-8")
+        with pytest.raises(ValueError, match=r"processing\.extra_props\.node\.name: expected text"):
+            config_mod.load(path)
+
+    def test_a_wrong_device_override_value_is_rejected(self, tmp_path):
+        path = tmp_path / "config.yaml"
+        path.write_text(
+            "devices:\n  - audio:\n      target_volume: loud\n", encoding="utf-8"
+        )
+        with pytest.raises(
+            ValueError, match=r"devices\[0\]\.audio\.target_volume: expected a number"
+        ):
+            config_mod.load(path)
+
+    def test_a_wrong_device_match_value_is_rejected(self, tmp_path):
+        path = tmp_path / "config.yaml"
+        path.write_text(
+            "devices:\n  - match:\n      device.bus: 7\n", encoding="utf-8"
+        )
+        with pytest.raises(ValueError, match=r"DeviceProfile\.match\.device\.bus: expected text"):
+            config_mod.load(path)
+
+    def test_remap_values_must_be_text(self, tmp_path):
+        path = tmp_path / "config.yaml"
+        path.write_text(
+            "profiles:\n  - name: game\n    remap:\n      KEY_CAPSLOCK: 5\n",
+            encoding="utf-8",
+        )
+        with pytest.raises(ValueError, match=r"remap\.KEY_CAPSLOCK: expected text"):
+            config_mod.load(path)
+
+    def test_macro_step_hold_must_be_a_whole_number(self, tmp_path):
+        path = tmp_path / "config.yaml"
+        path.write_text(
+            "macros:\n"
+            "  - name: jump\n"
+            "    bind: KEY_SPACE\n"
+            "    steps:\n"
+            "      - key: KEY_SPACE\n"
+            "        hold_ms: brief\n",
+            encoding="utf-8",
+        )
+        with pytest.raises(ValueError, match=r"steps\[0\]\.hold_ms: expected a whole number"):
+            config_mod.load(path)
+
+    def test_pointer_speed_accepts_a_number(self, tmp_path):
+        path = tmp_path / "config.yaml"
+        path.write_text(
+            "profiles:\n  - name: precise\n    pointer:\n      speed: 1.5\n",
+            encoding="utf-8",
+        )
+        assert config_mod.load(path).profiles[0].pointer.speed == 1.5
+
+    def test_valid_values_still_pass(self, tmp_path):
+        path = tmp_path / "config.yaml"
+        path.write_text(
+            "audio:\n"
+            "  attack_ms: 10\n"
+            "  target_volume: 1.4\n"
+            "  curve: s_curve\n"
+            "  enabled: true\n",
+            encoding="utf-8",
+        )
+        cfg = config_mod.load(path)
+        assert cfg.audio.attack_ms == 10
+        assert cfg.audio.target_volume == 1.4
+        assert cfg.audio.curve == "s_curve"
+
+    def test_missing_file_is_still_a_file_error_not_a_validation_error(self, tmp_path):
+        with pytest.raises(FileNotFoundError):
+            config_mod.load(tmp_path / "absent.yaml")
+
+    def test_an_empty_match_means_fallback_and_is_accepted(self, tmp_path):
+        path = tmp_path / "config.yaml"
+        path.write_text(
+            "devices:\n"
+            "  - name: fallback\n"
+            "    match:\n"
+            "    audio:\n"
+            "      target_volume: 0.7\n"
+            "profiles:\n"
+            "  - name: default\n"
+            "    match:\n"
+            "    remap:\n",
+            encoding="utf-8",
+        )
+        cfg = config_mod.load(path)
+        assert cfg.devices[0].match == {}
+        assert cfg.profiles[0].match == {}
+
+
 class TestDevices:
     def test_absent_gives_no_devices(self, tmp_path):
         path = tmp_path / "config.yaml"

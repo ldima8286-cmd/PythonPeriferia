@@ -285,6 +285,79 @@ def _code_of(name: str) -> int | None:
         return None
 
 
+def check_devices(devices: Sequence[Any]) -> Report:
+    """Reasons a device entry would never apply, or silently do nothing.
+
+    The top of `devices` is a match table: the first entry whose rules all
+    agree wins, and an entry with no rules agrees with any device. The traps
+    are therefore positional. An entry that sits after a match-anything entry
+    can never win, and an entry that wins but overrides no section changes
+    nothing, so the device it was written for gets the default audio settings
+    and nobody hears the difference until the hardware does.
+    """
+    found: list[Problem] = []
+    seen_names: dict[str, int] = {}
+    reached = True
+
+    for index, device in enumerate(devices):
+        name = getattr(device, "name", "") or f"devices[{index}]"
+        where = f"device {name!r}"
+        enabled = getattr(device, "enabled", True)
+        match = getattr(device, "match", None) or {}
+
+        if name in seen_names:
+            found.append(
+                Problem(
+                    ERROR,
+                    where,
+                    f"the same name is used twice, at positions"
+                    f" {seen_names[name]} and {index}, so which one is meant"
+                    " is a guess",
+                )
+            )
+        seen_names[name] = index
+
+        if not enabled:
+            continue
+
+        if not reached:
+            found.append(
+                Problem(
+                    WARNING,
+                    where,
+                    "matches nothing an earlier entry would not, and sits after"
+                    " an entry that matches any device, so it can never apply",
+                )
+            )
+            continue
+
+        if not match:
+            found.append(
+                Problem(
+                    WARNING,
+                    where,
+                    "matches any device, so every entry after it can never"
+                    " apply; a fallback entry earns that name best when it"
+                    " sits last",
+                )
+            )
+            reached = False
+        elif not getattr(device, "audio", None) and not getattr(device, "processing", None):
+            found.append(
+                Problem(
+                    WARNING,
+                    where,
+                    "matches devices but overrides nothing: with neither audio"
+                    " nor processing keys it changes no setting at all",
+                )
+            )
+
+    if not devices:
+        found.append(Problem(WARNING, "devices", "there are no device entries at all"))
+
+    return Report(tuple(found))
+
+
 def check_macros(
     macros: Sequence[Any],
     profiles: Sequence[Any] = (),

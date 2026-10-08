@@ -352,3 +352,75 @@ class TestTurningAKeyOff:
     def test_a_real_target_is_still_fine(self) -> None:
         report = validate.check_profiles([_profile(remap={"KEY_CAPSLOCK": "KEY_ESC"})])
         assert [str(p) for p in report.errors] == []
+
+
+class TestDeviceEntries:
+    """Device entries whose trap is positional.
+
+    The first entry whose rules all agree wins, and an entry with no rules
+    agrees with anything. A fallback placed in the middle makes every entry
+    after it dead, and an entry that wins without overrides changes nothing.
+    Both are silent until the hardware they were written for is present.
+    """
+
+    def test_no_entries_at_all_is_warned(self) -> None:
+        report = validate.check_devices([])
+        assert "no device entries" in str(report.warnings[0])
+
+    def test_a_healthy_fallback_at_the_end_is_fine(self) -> None:
+        report = validate.check_devices(
+            [
+                config_mod.DeviceProfile(
+                    name="usb", match={"device.bus": "usb"}, audio={"target_volume": 1.0}
+                ),
+                config_mod.DeviceProfile(
+                    name="builtin", match={"device.bus": "pci"}, audio={"target_volume": 1.0}
+                ),
+                config_mod.DeviceProfile(name="fallback", audio={"target_volume": 0.8}),
+            ]
+        )
+        assert report.ok
+
+    def test_a_mid_list_fallback_is_flaged(self) -> None:
+        report = validate.check_devices(
+            [
+                config_mod.DeviceProfile(
+                    name="usb", match={"device.bus": "usb"}, audio={"target_volume": 1.0}
+                ),
+                config_mod.DeviceProfile(name="anything", audio={"target_volume": 0.5}),
+                config_mod.DeviceProfile(
+                    name="later", match={"device.bus": "usb"}, audio={"target_volume": 1.0}
+                ),
+            ]
+        )
+        assert not report.errors
+        messages = [str(p) for p in report.problems]
+        assert any("can never apply" in m for m in messages)
+        assert any("sits after an entry that matches any device" in m for m in messages)
+
+    def test_a_winner_that_overrides_nothing_is_flaged(self) -> None:
+        report = validate.check_devices(
+            [config_mod.DeviceProfile(name="usb", match={"device.bus": "usb"})]
+        )
+        assert not report.errors
+        assert "overrides nothing" in str(report.warnings[0])
+
+    def test_duplicate_names_are_an_error(self) -> None:
+        report = validate.check_devices(
+            [
+                config_mod.DeviceProfile(
+                    name="usb", match={"device.bus": "usb"}, audio={"target_volume": 1.0}
+                ),
+                config_mod.DeviceProfile(
+                    name="usb", match={"device.bus": "pci"}, audio={"target_volume": 1.0}
+                ),
+            ]
+        )
+        assert not report.ok
+        assert "used twice" in str(report.errors[0])
+
+    def test_a_disabled_winner_is_not_flagged(self) -> None:
+        report = validate.check_devices(
+            [config_mod.DeviceProfile(name="off", match={"device.bus": "usb"}, enabled=False)]
+        )
+        assert report.ok

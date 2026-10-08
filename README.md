@@ -210,6 +210,7 @@ reads the keyboard, it never grabs it, so your typing keeps working normally.
 | `periferia teardown` | unload echo-cancel modules left behind by a crash |
 | `periferia status` | say whether the microphone is live right now |
 | `periferia config` | show the config actually in effect |
+| `periferia config --check` | say what is wrong with the config before the daemon obeys it |
 | `periferia install-service` | install the systemd user unit |
 | `periferia macro list` | every macro, what plays it, and what is in it |
 | `periferia macro check` | what will not work, and why |
@@ -238,6 +239,21 @@ reads the keyboard, it never grabs it, so your typing keeps working normally.
 | `processing.mono_from` | front-left | which input channel the mono one is taken from |
 | `devices` | empty | per-device overrides, see below |
 | `macros` | empty | recorded keypress sequences, see below |
+
+### When a config is wrong
+
+A config value is checked when it is read: a key has to hold the kind of value
+it is documented for, a time in milliseconds cannot be negative, a text setting
+cannot be a number, and a choice like `audio.curve` has to be one of the names
+it accepts. A typo like `attack_ms: fast`, the wrong `log.level`, a `devices:`
+entry whose `match` carries a number, or a `remap` target that is not a key
+name stops the daemon at startup or `periferia config --check` with the key
+named, instead of becoming a mic that opens instantly, a log you never see, or
+a keyboard with a hole in it. The semantic checks on top of the type checks —
+the profile that can never fire, the macro that plays its own trigger, the
+device entry that can never win because an earlier entry matches any device —
+are what `periferia profiles`, `periferia macro check` and the `devices` part
+of `config --check` are for.
 
 ### Settings that follow a device
 
@@ -696,6 +712,9 @@ reports on this.
 - [x] GUI for the config: profiles only, one at a time, comments kept
 - [x] input profiles: remap, turn a key off entirely, pointer speed per
       profile, and on KWin the profile follows the focused window
+- [x] strict config: every value is checked for type, range and allowed names
+      when it is read, and `periferia config --check` says what is wrong with
+      the whole file, profiles, macros and devices, before the daemon obeys it
 - [ ] RGB control with scripts and time-of-day profiles. Needs raw HID access,
       which this machine does not expose
 - [ ] compressor and de-esser. Not going to happen here: filter-chain will not

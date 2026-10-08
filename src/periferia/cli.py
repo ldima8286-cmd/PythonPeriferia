@@ -9,6 +9,7 @@ import os
 import re
 import select
 import shutil
+import subprocess
 import sys
 import time
 from collections.abc import Sequence
@@ -21,6 +22,7 @@ from .core import macro as macro_mod
 from .core import state as state_mod
 from .gui import model
 from .modules import audio as audio_mod
+from .modules import calibrate as calibrate_mod
 from .modules import hotkey, macrodevice
 from .modules.remap import DISABLED_TARGETS
 
@@ -560,6 +562,75 @@ def cmd_source_props(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_calibrate(args: argparse.Namespace) -> int:
+    """Measure a capture device: which channel to keep, and what a downmix loses.
+
+    Records both channels through the card, compares them band by band, and
+    prints the device registry entry the measurement recommends. The answer
+    belongs to the card, so it lands in the `devices:` section keyed by the
+    card rather than in the top-level sections.
+    """
+    import tempfile
+
+    cfg = config_mod.load(args.config)
+    source = args.source or audio_mod.pick_physical_source(cfg.audio.physical_source) or ""
+    if not source:
+        print("no capture source to calibrate", file=sys.stderr)
+        return 1
+    props = pipewire.source_props(source)
+    if props.get("audio.channels") == "1":
+        print(f"{source} is already a single channel: nothing to calibrate")
+        return 0
+
+    path = tempfile.mktemp(suffix=".wav")
+    try:
+        calibrate_mod.record_source(source, path, args.seconds, chirp=args.chirp)
+        left, right, rate = calibrate_mod.read_wav(path)
+    except (OSError, subprocess.SubprocessError) as exc:
+        print(f"recording failed: {exc}", file=sys.stderr)
+        return 1
+    finally:
+        os.unlink(path) if os.path.exists(path) else None
+
+    result = calibrate_mod.recommend(calibrate_mod.analyze(left, right, rate))
+    result.silent = calibrate_mod.is_silent(result.bands)
+
+    if args.json:
+        print(
+            json.dumps(
+                {
+                    "source": source,
+                    "seconds": len(left) / rate,
+                    "rate": rate,
+                    "copies": result.copies,
+                    "better": result.better,
+                    "worst_loss_db": result.worst_loss_db,
+                    "band": [result.band_lo, result.band_hi],
+                    "silent": result.silent,
+                    "bands": [
+                        {
+                            "lo": b.lo,
+                            "hi": b.hi,
+                            "left_db": b.left_db,
+                            "right_db": b.right_db,
+                            "imbalance_db": b.imbalance_db,
+                            "corr": b.corr,
+                            "mono_l_loss_db": b.mono_l_loss_db,
+                            "mono_r_loss_db": b.mono_r_loss_db,
+                        }
+                        for b in result.bands
+                    ],
+                },
+                indent=2,
+                ensure_ascii=False,
+            )
+        )
+        return 0
+
+    print(calibrate_mod.format_report(source, result, len(left) / rate, rate))
+    return 0
+
+
 def cmd_graph(args: argparse.Namespace) -> int:
     """Show the graph as pw-dump reports it, the way cleanup reads it."""
     if not pipewire.have_graph():
@@ -907,6 +978,21 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("props", help="show the properties a source matches against")
     p.add_argument("name", nargs="?", help="source name; without one, the physical mic")
     p.set_defaults(func=cmd_source_props)
+    p = sub.add_parser(
+        "calibrate",
+        help="measure which channel the mono stage should keep",
+    )
+    p.add_argument("--source", help="source to record; without one, the physical mic")
+    p.add_argument(
+        "--seconds", type=float, default=5.0, help="recording length in seconds (default 5)"
+    )
+    p.add_argument(
+        "--chirp",
+        action="store_true",
+        help="play a multitone over the output while recording, so the card has content",
+    )
+    p.add_argument("--json", action="store_true", help="print the report as JSON")
+    p.set_defaults(func=cmd_calibrate)
     sub.add_parser(
         "graph",
         help="show the PipeWire graph the way cleanup reads it",

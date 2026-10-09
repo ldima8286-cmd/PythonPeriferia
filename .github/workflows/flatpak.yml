@@ -1,0 +1,24 @@
+name: Flatpak
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: flatpak/flatpak-github-actions/flatpak-builder@v6
+        with:
+          bundle: periferia.flatpak
+          manifest-path: packaging/flatpak/org.periferia.Periferia.yaml
+          cache-key: flatpak-${{ runner.os }}-${{ github.sha }}
+          cache: true
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: org.periferia.Periferia
+          path: periferia.flatpak

@@ -1,0 +1,19 @@
+#!/bin/sh
+# The single entry point the flatpak runs. The same bundle is the window, the
+# tray or the daemon, picked by the first argument, so `flatpak run
+# org.periferia.Periferia daemon` starts push-to-talk without an open window.
+set -eu
+
+case "${1:-}" in
+  daemon)
+    shift
+    exec /app/bin/periferia-daemon "$@"
+    ;;
+  tray)
+    shift
+    exec /app/bin/periferia-tray "$@"
+    ;;
+  *)
+    exec /app/bin/periferia-gui "$@"
+    ;;
+esac

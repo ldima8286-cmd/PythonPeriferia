@@ -77,6 +77,34 @@ that does not start.
 To have it in the launcher, copy it to `~/Applications` (GNOME and KDE both
 read that) and it appears on its own from the desktop entry inside.
 
+### As a Flatpak
+
+The `packaging/flatpak/` directory holds a manifest that bundles the window,
+the tray and the daemon into one sandbox. The Flatpak CI workflow builds it on
+every push and uploads `org.periferia.Periferia.flatpak` as an artifact; a
+local build needs `flatpak-builder` and a Flathub remote configured:
+
+```bash
+flatpak-builder --user --install build-dir \
+  packaging/flatpak/org.periferia.Periferia.yaml
+flatpak run org.periferia.Periferia
+```
+
+The same bundle serves as the daemon and the tray:
+
+```bash
+flatpak run org.periferia.Periferia daemon
+flatpak run org.periferia.Periferia tray
+```
+
+The sandbox is allowed the keyboard (`--device=all`, for evdev and
+`/dev/uinput`) and the sound server (`--socket=pipewire`). On a host that
+denies uinput, remapping falls back to bare push-to-talk exactly as it does
+outside a sandbox. Profiles that follow the focused window still need KWin and
+reach it over the session bus; a host restriction there is reported by
+`periferia check`. The config lives in `~/.config/periferia` and is shared
+with a host-installed daemon.
+
 ### From source
 
 ```bash
@@ -731,7 +759,8 @@ reports on this.
 - [x] PipeWire graph read directly through `pw-dump`, so a leftover module is
       found off the node itself rather than guessed at through pactl. Writing
       still goes through pactl, which is the supported way to load a module
-- [ ] Flatpak packaging, AUR
+- [x] Flatpak: a manifest in `packaging/flatpak` and a workflow that builds
+      and publishes the bundle; AUR packaging remains
 
 Remapping needs `/dev/uinput`, which this machine does not have, so the router
 has never run against real hardware. The daemon falls back to reading the

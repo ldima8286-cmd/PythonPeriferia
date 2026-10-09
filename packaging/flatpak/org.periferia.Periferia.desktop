@@ -1,0 +1,13 @@
+[Desktop Entry]
+Type=Application
+Name=Periferia
+Name[ru]=Periferia
+Comment=Push-to-talk microphone gated by a key
+Comment[ru]=Микрофон по клавише: говорит, пока держишь
+Exec=periferia-run
+Icon=org.periferia.Periferia
+Terminal=false
+Categories=AudioVideo;Audio;Mixer;Utility;
+Keywords=microphone;ptt;push-to-talk;voice;chat;discord;stream;
+StartupNotify=true
+StartupWMClass=Periferia

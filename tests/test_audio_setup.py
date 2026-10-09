@@ -21,6 +21,8 @@ MicProcessing = processing_mod.MicProcessing
 class _FakePipewire:
     """Records module loads/unloads so a leak shows up as a test failure."""
 
+    PipeWireError = pipewire_mod.PipeWireError
+
     def __init__(self, source: str | None) -> None:
         self.source = source
         self.loaded: list[tuple[str, list[str]]] = []
@@ -31,12 +33,23 @@ class _FakePipewire:
         self.source_for: dict[int, str] = {}
         self.fail_kinds: set[str] = set()
         self._next_id = 77
+        self.default_src: str | None = None
+        self.default_set: list[str] = []
 
     def find_source(self, name: str) -> str | None:
         return None
 
     def source_exists(self, name: str) -> bool:
         return False
+
+    def default_source(self) -> str | None:
+        return self.default_src
+
+    def set_default_source(self, name: str) -> None:
+        if "set-default-source" in self.fail_kinds:
+            raise pipewire_mod.PipeWireError("set-default-source denied")
+        self.default_set.append(name)
+        self.default_src = name
 
     def source_by_module(self, module_id: int) -> str | None:
         return self.source_for.get(module_id, self.source)
@@ -329,6 +342,79 @@ def test_configure_takes_effect_on_the_next_start(
     processing.configure(other)
 
     assert processing.cfg is other
+
+
+def test_default_is_moved_to_the_requested_device_and_back(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # module-echo-cancel captures the default source and ignores source= in
+    # this PipeWire build, so a capture device that is not the default has to
+    # become the default for the moment the module goes up.
+    cfg = ProcessingConfig(stereo_to_mono=False)
+    processing, fake = _processing(monkeypatch, source="echo-cancel-source", cfg=cfg)
+    fake.default_src = "alsa_input.pci-0000_00_1f.3.analog-stereo"
+
+    assert processing.start("hw:physical", name="PeriferiaMic") == "echo-cancel-source"
+    assert fake.default_set == [
+        "hw:physical",
+        "alsa_input.pci-0000_00_1f.3.analog-stereo",
+    ]
+
+
+def test_default_already_matching_is_not_touched(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cfg = ProcessingConfig(stereo_to_mono=False)
+    processing, fake = _processing(monkeypatch, source="echo-cancel-source", cfg=cfg)
+    fake.default_src = "hw:physical"
+
+    processing.start("hw:physical", name="PeriferiaMic")
+
+    assert fake.default_set == []
+
+
+def test_default_move_failure_does_not_stop_the_load(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cfg = ProcessingConfig(stereo_to_mono=False)
+    processing, fake = _processing(monkeypatch, source="echo-cancel-source", cfg=cfg)
+    fake.default_src = "alsa_input.pci-0000_00_1f.3.analog-stereo"
+    fake.fail_kinds = {"set-default-source"}
+
+    assert processing.start("hw:physical", name="PeriferiaMic") == "echo-cancel-source"
+    assert fake.default_set == []
+
+
+def test_the_default_is_restored_even_when_the_module_refuses_to_load(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    processing, fake = _processing(
+        monkeypatch,
+        source="echo-cancel-source",
+        cfg=ProcessingConfig(stereo_to_mono=False),
+    )
+    fake.default_src = "alsa_input.pci-0000_00_1f.3.analog-stereo"
+    fake.fail_kinds = {"module-echo-cancel"}
+
+    assert processing.start("hw:physical", name="PeriferiaMic") is None
+    assert fake.default_set == [
+        "hw:physical",
+        "alsa_input.pci-0000_00_1f.3.analog-stereo",
+    ]
+
+
+def test_the_default_is_restored_after_the_mono_stage_too(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    processing, fake = _processing(monkeypatch, source="echo-cancel-source")
+    fake.source_for = {78: "PeriferiaMic"}
+    fake.default_src = "alsa_input.pci-0000_00_1f.3.analog-stereo"
+
+    assert processing.start("hw:physical", name="PeriferiaMic") == "PeriferiaMic"
+    assert fake.default_set == [
+        "hw:physical",
+        "alsa_input.pci-0000_00_1f.3.analog-stereo",
+    ]
 
 
 def test_stale_detection_ignores_other_apps(monkeypatch: pytest.MonkeyPatch) -> None:

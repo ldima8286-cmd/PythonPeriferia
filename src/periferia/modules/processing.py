@@ -122,30 +122,64 @@ class MicProcessing:
         args = [f"source={physical_source}"]
         args += [f"{key}={value}" for key, value in props.items()]
 
-        module_id = pipewire.load_module(MODULE, args)
-        if module_id is None:
-            log.error("%s refused to load", MODULE)
-            return None
-        self._module_id = module_id
-        self._source = self._find_source(module_id)
-        if not self._source:
-            log.error("%s loaded but created no source", MODULE)
-            pipewire.unload_module(module_id)
-            self._module_id = None
-            return None
-        if not mono:
-            log.info("mic processing on %s (module %s)", self._source, module_id)
-            log.info("properties: %s", props)
-            return self._source
+        # module-echo-cancel captures whichever source is the default when the
+        # module goes up, and this PipeWire build ignores its own source=
+        # argument entirely, so the name above is a hint for future builds at
+        # best. Point the default at the requested device for the moment the
+        # module comes into existence, then put it back.
+        previous = pipewire.default_source()
+        moved = False
+        if previous and previous != physical_source:
+            try:
+                pipewire.set_default_source(physical_source)
+                moved = True
+            except pipewire.PipeWireError as exc:
+                log.warning(
+                    "echo-cancel will capture %s instead of %s: %s",
+                    previous,
+                    physical_source,
+                    exc,
+                )
+        try:
+            module_id = pipewire.load_module(MODULE, args)
+            if module_id is None:
+                log.error("%s refused to load", MODULE)
+                return None
+            self._module_id = module_id
+            self._source = self._find_source(module_id)
+            if not self._source:
+                log.error("%s loaded but created no source", MODULE)
+                pipewire.unload_module(module_id)
+                self._module_id = None
+                return None
+            if not mono:
+                log.info("mic processing on %s (module %s)", self._source, module_id)
+                log.info("properties: %s", props)
+                return self._source
+            if name is None:
+                return None
+            return self._mono(name, module_id, props)
+        finally:
+            if moved and previous is not None:
+                try:
+                    pipewire.set_default_source(previous)
+                except pipewire.PipeWireError as exc:
+                    log.warning("could not restore the default source: %s", exc)
 
+    def _mono(
+        self, name: str, module_id: int, props: dict[str, str]
+    ) -> str | None:
+        source = self._source
+        if source is None:
+            return None
         # The echo-cancel stage must not attenuate what the remap captures,
         # and nothing else touches its volume now that the gate drives the
         # mono source instead.
-        pipewire.set_volume(self._source, 1.0)
+        pipewire.set_volume(source, 1.0)
         remap_id = pipewire.load_module(
             REMAP,
             [
-                f"master={self._source}",
+                f"master={source}",
                 "channels=1",
                 # PipeWire picks the master channel by its position. Averaging
                 # the two channels instead would keep the cancellation this

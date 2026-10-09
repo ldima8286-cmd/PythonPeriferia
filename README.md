@@ -781,12 +781,15 @@ cancellation. PipeWire mixes the single channel down by 1/sqrt(2), a flat
 compensates for if wanted; `processing.stereo_to_mono: false` restores the
 unmodified stereo source.
 
-One finding along the way is worth keeping: `pactl load-module
-module-echo-cancel source=...` accepts but ignores the `source` argument in
-this PipeWire build (`source_master=...` errors out with "no such object"), and
-`module-echo-cancel` cannot point its capture at anything but the default
-source. The mono stage does not depend on that: it remaps the echo-cancel
-output instead of the physical capture.
+One finding along the way is worth keeping: in this PipeWire build
+`module-echo-cancel` ignores its `source=` argument (`source_master=...`
+errors out with "no such object") and captures whichever source is the default
+when the module goes up. The daemon works around that by temporarily making
+the requested capture device the default while the module loads and restoring
+the previous default afterwards; where the session refuses to move the default,
+the log says which source the module actually captured instead. The mono stage
+does not depend on any of this: it remaps the echo-cancel output instead of
+the physical capture.
 
 ## License
 

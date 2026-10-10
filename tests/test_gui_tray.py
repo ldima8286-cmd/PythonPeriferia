@@ -65,6 +65,13 @@ def test_the_tray_takes_its_text_from_the_same_source_as_its_colour():
         assert "Periferia" in look.text
 
 
+def test_a_fresh_tray_already_has_a_icon(app):
+    """A tray shown before any status must not print 'No Icon set'."""
+    tray = Tray()
+    assert not tray.icon().isNull()
+    assert tray.look is None
+
+
 def test_the_tray_follows_the_daemon(app):
     tray = Tray()
     assert tray.update_status(MicStatus()) is True

@@ -99,6 +99,11 @@ class Tray(QSystemTrayIcon):
         # right click, leaves the window two clicks away.
         self.activated.connect(self._activated)
 
+        # Shown without an icon, a tray prints its own warning and renders
+        # nothing on some panels. The neutral dot is never wrong to start on;
+        # the first status replaces it.
+        self.setIcon(dot_icon(model.STATE_COLOURS["unknown"]))
+
     def _activated(self, reason: QSystemTrayIcon.ActivationReason) -> None:
         if reason in (
             QSystemTrayIcon.ActivationReason.Trigger,

@@ -1,12 +1,20 @@
 # Periferia
 
-Global push-to-talk on any key, virtual microphone, and microphone processing
-for Linux. Python, PipeWire, evdev. Works on Wayland.
+[English](README.md) · [Русский](README.ru.md) · [Инструкция для чайников](docs/getting-started.ru.md)
+
+**Version 1.0 — feature complete.** Global push-to-talk on any key, virtual
+microphone, and microphone processing for Linux. Python, PipeWire, evdev. Works
+on Wayland.
 
 The microphone is closed unless you are holding a key you chose. Not a toggle:
 release the key and the mic is muted again. This works for Discord, Zoom, OBS,
 a browser, or anything else, because Periferia controls the sound server rather
 than any one application.
+
+The project is done: it does the one thing it set out to do, and no new feature
+is planned. The two ideas that never made it in — RGB and a compressor — are out
+of scope, not pending; the reasons are in [Status](#status-10-feature-complete).
+Bug fixes and reports from other machines are welcome.
 
 ## What exists right now
 
@@ -29,8 +37,9 @@ than any one application.
 The daemon watches the config file, so a finished macro recording or an edited
 keyboard profile is picked up within about a second. See "Macros".
 
-  Not built yet: RGB. The input profiles are configurable and validated, and on
-  KWin the profile follows the focused window. See "Roadmap".
+RGB control is deliberately not built: it needs raw HID access this program will
+not ask for. The input profiles are configurable and validated, and on KWin the
+profile follows the focused window. See [Status](#status-10-feature-complete).
 
 ### Knowing whether the microphone is open
 
@@ -381,6 +390,16 @@ the three fields out because a fallback has no conditions to match.
 **Скорость указателя** is KWin's pointer speed, from 0.05 to 10, where 1.0 is
 the desktop's own. Tick **менять** to put a speed in this profile; a profile
 without that tick has no `pointer` section and never touches your settings.
+
+The window is started on its own:
+
+```bash
+uv pip install --python .venv/bin/python -e ".[gui]"
+.venv/bin/periferia-gui
+```
+
+It has no say over the audio path or the daemon. It is a view of what they
+already do, which is why it can be replaced without changing anything else.
 
 ## Which profile is in force
 
@@ -736,9 +755,10 @@ Being honest about this, because it decides how you should file a bug.
 | X11 | should work, not verified |
 | Keyboards over Bluetooth | should work if the udev rule matches them, not verified |
 
-There are no CI runs, so "works on my machine" is currently the only evidence.
-If you get it running somewhere else, the useful thing to report is the distro,
-the desktop session, and the output of `periferia check`.
+The test suite runs on every commit locally but not in CI: the only CI job is
+the Flatpak build, so "works on my machine" is otherwise the only evidence. If
+you get it running somewhere else, the useful thing to report is the distro, the
+desktop session, and the output of `periferia check`.
 
 ## Troubleshooting
 
@@ -767,7 +787,13 @@ ships with `pipewire`; `periferia graph` prints what it can see.
 **Flatpak app sees no sound.** Flatpak needs a Pulse socket. `periferia check`
 reports on this.
 
-## Roadmap
+## Status: 1.0, feature complete
+
+Periferia is at 1.0 and feature complete. Nothing below is pending: the
+checklist is closed, and the two entries under "Not planned" are out of scope
+rather than unfinished.
+
+Shipped:
 
 - [x] stereo to mono: the two channels really differ (measured), so the
       virtual microphone publishes one mono channel carried by the left channel
@@ -784,11 +810,6 @@ reports on this.
 - [x] strict config: every value is checked for type, range and allowed names
       when it is read, and `periferia config --check` says what is wrong with
       the whole file, profiles, macros and devices, before the daemon obeys it
-- [ ] RGB control with scripts and time-of-day profiles. Needs raw HID access,
-      which this machine does not expose
-- [ ] compressor and de-esser. Not going to happen here: filter-chain will not
-      load, so there is nowhere to put one. EasyEffects does this properly
-      already
 - [x] PipeWire graph read directly through `pw-dump`, so a leftover module is
       found off the node itself rather than guessed at through pactl. Writing
       still goes through pactl, which is the supported way to load a module
@@ -796,6 +817,17 @@ reports on this.
       and publishes the bundle
 - [x] AUR: a PKGBUILD in `packaging/aur`, ready to run `makepkg -si` once a
       GitHub release tag exists
+
+Not planned:
+
+- [ ] RGB control with scripts and time-of-day profiles. It needs raw HID
+      access this machine does not expose and this program will not ask for.
+- [ ] compressor and de-esser. Not going to happen here: filter-chain will not
+      load, so there is nowhere to put one. EasyEffects does this properly
+      already.
+
+What follows are the engineering notes for whoever picks this up: the parts
+that could not be verified in the environment this was written in.
 
 Remapping needs `/dev/uinput`, which this machine does not have, so the router
 has never run against real hardware. The daemon falls back to reading the
@@ -858,24 +890,3 @@ the physical capture.
 ## License
 
 MIT.
-
-### The window
-
-`periferia-gui` opens a real window instead of the terminal interface. It shows
-what the microphone is doing, straight from the same state file
-`periferia status` reads, so there is nothing to keep in step and no second
-source of truth.
-
-It edits one thing so far: the keyboard profile. Saving rewrites only the
-`profiles` section and keeps the comments, indentation and any section the
-window has no opinion about, because a settings window that reflows the rest of
-your config on every save is worse than no window at all.
-
-```bash
-uv pip install --python .venv/bin/python -e ".[gui]"
-.venv/bin/periferia-gui
-```
-
-The window has no say over the audio path or the daemon. It is a view of what
-they already do, which is why it can be replaced without changing anything
-else.

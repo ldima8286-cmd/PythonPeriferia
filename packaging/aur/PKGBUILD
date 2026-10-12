@@ -4,12 +4,12 @@
 #   makepkg --printsrcinfo > .SRCINFO
 #   namcap PKGBUILD && namcap periferia-*.pkg.tar.zst
 #
-# Builds from the GitHub release archive of the current tag (v0.1.0 above).
+# Builds from the GitHub release archive of the current tag (v1.0.0 above).
 # If the tag does not exist yet, either create it on GitHub or switch source
 # to `periferia::git+https://github.com/ldima8286-cmd/PythonPeriferia` and
 # set sha256sums=('SKIP').
 pkgname=periferia
-pkgver=0.1.0
+pkgver=1.0.0
 pkgrel=1
 pkgdesc="Global push-to-talk on any key, virtual microphone and mic processing for Linux"
 arch=('any')

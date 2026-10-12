@@ -19,6 +19,7 @@ from typing import Any
 from .core import activewindow, envcheck, pipewire, validate
 from .core import config as config_mod
 from .core import macro as macro_mod
+from .core import profiles as profiles_mod
 from .core import state as state_mod
 from .gui import model
 from .modules import audio as audio_mod
@@ -436,6 +437,52 @@ def cmd_profiles(args: argparse.Namespace) -> int:
 def _is_off(target: object) -> bool:
     """Whether a remap target means "this key does not exist"."""
     return str(target).strip().lower() in DISABLED_TARGETS
+
+
+def cmd_profiles_export(args: argparse.Namespace) -> int:
+    conf = config_mod.load(args.config)
+    path = Path(args.file)
+    try:
+        profiles_mod.write_raw(path, profiles_mod.export_block(conf))
+    except OSError as exc:
+        print(f"cannot write {path}: {exc}", file=sys.stderr)
+        return 1
+    count = len(conf.profiles)
+    plural = "" if count == 1 else "s"
+    print(f"  exported {count} profile{plural} to {path}")
+    return 0
+
+
+def cmd_profiles_import(args: argparse.Namespace) -> int:
+    conf = config_mod.load(args.config)
+    try:
+        incoming = profiles_mod.parse_file(args.file)
+    except OSError as exc:
+        print(f"cannot read {args.file}: {exc}", file=sys.stderr)
+        return 1
+    except ValueError as exc:
+        print(f"{args.file}: {exc}", file=sys.stderr)
+        return 1
+    merged = profiles_mod.merge(conf, incoming, replace=args.replace)
+    path = conf.path or config_mod.default_config_path()
+    if path.is_file():
+        try:
+            container = profiles_mod.read_raw(path)
+        except (OSError, ValueError) as exc:
+            print(f"cannot read {path}: {exc}", file=sys.stderr)
+            return 1
+    else:
+        container = profiles_mod.export_block(merged)
+    container["profiles"] = profiles_mod.export_block(merged)["profiles"]
+    try:
+        profiles_mod.write_raw(path, container)
+    except OSError as exc:
+        print(f"cannot write {path}: {exc}", file=sys.stderr)
+        return 1
+    count = len(incoming)
+    plural = "" if count == 1 else "s"
+    print(f"  imported {count} profile{plural} into {path}")
+    return 0
 
 
 def cmd_probe_window(args: argparse.Namespace) -> int:
@@ -1081,10 +1128,28 @@ def build_parser() -> argparse.ArgumentParser:
     gate.add_argument("source", nargs="?", help="source to watch, defaults to the daemon's")
     gate.add_argument("--timeout", type=float, default=30.0, help="seconds to wait, default 30")
     gate.set_defaults(func=cmd_gate_check)
-    sub.add_parser(
+    profiles_cmd = sub.add_parser(
         "profiles",
-        help="show the configured profiles and what is wrong with them",
+        help="show, export and import profiles",
+    )
+    profiles_cmd.set_defaults(func=cmd_profiles)
+    profiles_sub = profiles_cmd.add_subparsers(dest="profile_command")
+    profiles_sub.add_parser(
+        "list", help="show the configured profiles and what is wrong with them"
     ).set_defaults(func=cmd_profiles)
+    export_cmd = profiles_sub.add_parser(
+        "export", help="write the profiles to a YAML file"
+    )
+    export_cmd.add_argument("file", help="where to write them")
+    export_cmd.set_defaults(func=cmd_profiles_export)
+    import_cmd = profiles_sub.add_parser(
+        "import", help="merge profiles from a YAML file into the config"
+    )
+    import_cmd.add_argument("file", help="where to read them from")
+    import_cmd.add_argument(
+        "--replace", action="store_true", help="drop the configured profiles first"
+    )
+    import_cmd.set_defaults(func=cmd_profiles_import)
 
     macro_cmd = sub.add_parser("macro", help="record, list and check macros")
     macro_sub = macro_cmd.add_subparsers(dest="macro_command")

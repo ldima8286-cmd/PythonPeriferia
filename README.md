@@ -446,6 +446,21 @@ profile that only applies to some windows: if that window ever fails to be
 detected, the way out stays gone. Held modifiers can be turned off even though
 they cannot be remapped, since a key that emits nothing cannot get stuck.
 
+### Moving profiles to another machine
+
+A tuned profile set travels better than a Config, so it can be written out and
+brought back on its own:
+
+```bash
+periferia profiles export profiles.yaml
+periferia profiles import profiles.yaml     # on the other machine
+```
+
+The file is the `profiles:` section alone, validated the same way the config
+is. Without `--replace`, an imported profile with a name that already exists
+takes its place and everything else is kept; with `--replace` the configured
+profiles are dropped first, so importing an empty file clears them.
+
 Switching applies immediately. Rebuilding a remap table takes the keyboard for
 as long as it takes, so it is done once per switch rather than once per event,
 and only when the profile actually changes.
@@ -764,6 +779,8 @@ reports on this.
       comments kept
 - [x] input profiles: remap, turn a key off entirely, pointer speed per
       profile, and on KWin the profile follows the focused window
+- [x] profiles travel between machines: `periferia profiles export/import`
+      moves one `profiles:` block, merges by name or replaces the whole set
 - [x] strict config: every value is checked for type, range and allowed names
       when it is read, and `periferia config --check` says what is wrong with
       the whole file, profiles, macros and devices, before the daemon obeys it

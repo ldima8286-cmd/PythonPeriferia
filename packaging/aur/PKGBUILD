@@ -1,0 +1,43 @@
+# Maintainer: your name <you@example.org>
+#
+# Before publishing this to the AUR:
+#   makepkg --printsrcinfo > .SRCINFO
+#   namcap PKGBUILD && namcap periferia-*.pkg.tar.zst
+#
+# Builds from the GitHub release archive of the current tag (v0.1.0 above).
+# If the tag does not exist yet, either create it on GitHub or switch source
+# to `periferia::git+https://github.com/ldima8286-cmd/PythonPeriferia` and
+# set sha256sums=('SKIP').
+pkgname=periferia
+pkgver=0.1.0
+pkgrel=1
+pkgdesc="Global push-to-talk on any key, virtual microphone and mic processing for Linux"
+arch=('any')
+url="https://github.com/ldima8286-cmd/PythonPeriferia"
+license=('MIT')
+depends=(
+    'python'
+    'python-yaml'
+    'python-evdev'
+    'python-dbus-next'
+    'pipewire'
+    'wireplumber'
+    'libpulse'
+)
+makedepends=('git' 'python-build' 'python-installer' 'python-wheel' 'python-hatchling')
+optdepends=(
+    'python-pyside6: the configuration window and the tray'
+    'python-ruamel-yaml: the window edits the configuration'
+)
+source=("$pkgname-$pkgver.tar.gz::https://github.com/ldima8286-cmd/PythonPeriferia/archive/refs/tags/v$pkgver.tar.gz")
+sha256sums=('SKIP')
+
+build() {
+    cd "$srcdir/PythonPeriferia-$pkgver"
+    python -m build --wheel --no-isolation
+}
+
+package() {
+    cd "$srcdir/PythonPeriferia-$pkgver"
+    python -m installer --destdir="$pkgdir" dist/*.whl
+}

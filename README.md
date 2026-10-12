@@ -105,6 +105,22 @@ reach it over the session bus; a host restriction there is reported by
 `periferia check`. The config lives in `~/.config/periferia` and is shared
 with a host-installed daemon.
 
+### From the AUR (Arch)
+
+`packaging/aur/PKGBUILD` builds one pacman package with the daemon, the window
+and the tray:
+
+```bash
+cd packaging/aur
+makepkg -si
+```
+
+The window and the tray need PySide6, which is an optional dependency there;
+install it first (`pacman -S python-pyside6 python-ruamel-yaml`) for the full
+set. The build takes the source from the GitHub release archive of the tag in
+`pkgver`; if that tag does not exist, the header of the PKGBUILD says how to
+point it at the default branch instead.
+
 ### From source
 
 ```bash
@@ -760,7 +776,9 @@ reports on this.
       found off the node itself rather than guessed at through pactl. Writing
       still goes through pactl, which is the supported way to load a module
 - [x] Flatpak: a manifest in `packaging/flatpak` and a workflow that builds
-      and publishes the bundle; AUR packaging remains
+      and publishes the bundle
+- [x] AUR: a PKGBUILD in `packaging/aur`, ready to run `makepkg -si` once a
+      GitHub release tag exists
 
 Remapping needs `/dev/uinput`, which this machine does not have, so the router
 has never run against real hardware. The daemon falls back to reading the

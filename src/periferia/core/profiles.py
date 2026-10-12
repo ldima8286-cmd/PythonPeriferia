@@ -23,13 +23,37 @@ from . import config as config_mod
 from .config import Config, ProfileConfig
 
 
+def _lean(value: Any) -> Any:
+    """Drop what a profile would be given again on the way back in.
+
+    A profile that carries its defaults writes four lines nobody wrote:
+    `enabled: true`, an empty `match`, a null `pointer` and an empty
+    `macros`. They are rebuilt on import, so leaving them out keeps the file
+    readable and an import from turning a two-line profile into a seven-line
+    one.
+    """
+    if isinstance(value, dict):
+        out: dict[str, Any] = {}
+        for key, item in value.items():
+            item = _lean(item)
+            if item is None or item == {} or item == []:
+                continue
+            if key == "enabled" and item is True:
+                continue
+            out[key] = item
+        return out
+    if isinstance(value, list):
+        return [_lean(item) for item in value]
+    return value
+
+
 def export_block(conf: Config) -> dict[str, Any]:
     """The profiles as a standalone YAML container.
 
     Only the profiles leave: everything else a config carries belongs to the
     machine it is on, and a key layout travels worse than a remap.
     """
-    return {"profiles": [config_mod._unbox(p) for p in conf.profiles]}
+    return {"profiles": [_lean(config_mod._unbox(p)) for p in conf.profiles]}
 
 
 def parse_text(text: str) -> list[ProfileConfig]:
@@ -82,21 +106,6 @@ def merge(
     merged += [p for p in incoming if p.name not in seen]
     conf.profiles = merged
     return conf
-
-
-def read_raw(path: str | Path) -> dict[str, Any]:
-    """Read a config file the way the CLI always has: a plain mapping.
-
-    The sections the import does not touch are read and written back so that
-    importing profiles cannot drop the rest of a machine's config.
-    """
-    text = Path(path).read_text(encoding="utf-8")
-    parsed = yaml.safe_load(text)
-    if parsed is None:
-        return {}
-    if not isinstance(parsed, dict):
-        raise ValueError(f"{path}: the config must be a mapping")
-    return parsed
 
 
 def write_raw(path: str | Path, container: dict[str, Any]) -> None:

@@ -363,7 +363,7 @@ def _macro_finish(
 
 def _macro_delete(args: argparse.Namespace, conf: config_mod.Config) -> int:
     path = conf.path or config_mod.default_config_path()
-    data = model.load_raw(path)
+    data = model.load_roundtrip(path)
     found = False
     container = data if isinstance(data, dict) else {}
     for profile in container.get("profiles") or []:
@@ -380,9 +380,7 @@ def _macro_delete(args: argparse.Namespace, conf: config_mod.Config) -> int:
     if not found:
         print(f"no macro named {args.name!r} in {path}", file=sys.stderr)
         return 1
-    import yaml as pyyaml
-
-    path.write_text(pyyaml.safe_dump(container, sort_keys=False), encoding="utf-8")
+    model.save_raw(path, container)
     print(f"deleted {args.name!r} from {path}")
     return 0
 
@@ -467,15 +465,16 @@ def cmd_profiles_import(args: argparse.Namespace) -> int:
     path = conf.path or config_mod.default_config_path()
     if path.is_file():
         try:
-            container = profiles_mod.read_raw(path)
+            loaded = model.load_roundtrip(path)
         except (OSError, ValueError) as exc:
             print(f"cannot read {path}: {exc}", file=sys.stderr)
             return 1
+        container = loaded if isinstance(loaded, dict) else {}
     else:
         container = profiles_mod.export_block(merged)
     container["profiles"] = profiles_mod.export_block(merged)["profiles"]
     try:
-        profiles_mod.write_raw(path, container)
+        model.save_raw(path, container)
     except OSError as exc:
         print(f"cannot write {path}: {exc}", file=sys.stderr)
         return 1
@@ -1008,7 +1007,7 @@ def _config_check(args: argparse.Namespace) -> int:
 def cmd_init(args: argparse.Namespace) -> int:
     target = config_mod.default_config_path()
     if target.exists() and not args.force:
-        print(f"{target} already exists, use --force to overwrite")
+        print(f"{target} already exists, use --force to overwrite", file=sys.stderr)
         return 1
     template = Path(__file__).resolve().parent.parent.parent / "config.example.yaml"
     if template.is_file():
@@ -1217,7 +1216,11 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("status", help="show whether the microphone is live").set_defaults(
         func=cmd_status
     )
-    sub.add_parser("init-config", help="write a starter config").set_defaults(func=cmd_init)
+    init_cmd = sub.add_parser("init-config", help="write a starter config")
+    init_cmd.add_argument(
+        "--force", action="store_true", help="overwrite an existing config"
+    )
+    init_cmd.set_defaults(func=cmd_init)
 
     p = sub.add_parser("set-default", help="point the default source at a device")
     p.add_argument("name", nargs="?", help="source name, default is the physical mic")

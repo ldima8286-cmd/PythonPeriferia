@@ -41,6 +41,12 @@ def test_export_holds_only_the_profiles(tmp_path):
     assert set(block) == {"profiles"}
     assert len(block["profiles"]) == 2
     assert block["profiles"][0]["name"] == "games"
+    assert block["profiles"][0]["pointer"] == {"speed": 1.5}
+
+    fallback = block["profiles"][1]
+    for default_key in ("enabled", "match", "pointer", "macros"):
+        assert default_key not in fallback
+    assert fallback["remap"] == {"KEY_RIGHTCTRL": "off"}
 
 
 def test_parse_accepts_a_block_and_a_bare_list():

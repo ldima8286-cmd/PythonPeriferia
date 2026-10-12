@@ -343,6 +343,36 @@ def load_raw(path: Path) -> dict[str, Any]:
     return dict(data or {})
 
 
+def save_raw(path: Path, data: dict[str, Any]) -> None:
+    """Write a whole config back with the dumper it was read with.
+
+    Load with round-trip YAML and dump with plain PyYAML and the first nested
+    mapping ends it: inside a `dict()` are ruamel CommentedMaps, which PyYAML
+    refuses to represent. Commands that edit one section of the file use this
+    so an edit cannot fail on the shape of the sections it never touched.
+    """
+    text = path.read_text(encoding="utf-8") if path.is_file() else ""
+    yaml = _yaml_for(text) if HAVE_ROUND_TRIP else None
+    _dump(path, data, yaml)
+
+
+def load_roundtrip(path: Path) -> Any:
+    """The file as the round-trip loader hands it back, comments included.
+
+    Commands that edit one section keep this object rather than copying it
+    into a plain dict, because the copy drops the comments the object was
+    carrying. save_raw writes it back unchanged apart from the edit.
+    """
+    if not path.is_file():
+        return {}
+    text = path.read_text(encoding="utf-8")
+    if HAVE_ROUND_TRIP:
+        return _yaml_for(text).load(text) or {}
+    import yaml
+
+    return yaml.safe_load(text) or {}
+
+
 def save_draft(
     path: Path,
     draft: ProfileDraft,
@@ -845,15 +875,6 @@ def save_macro(
 
 
 def _dump(path: Path, data: dict[str, Any], yaml: Any) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    if yaml is not None:
-        with path.open("w", encoding="utf-8") as fh:
-            yaml.dump(data, fh)
-    else:
-        import yaml as pyyaml
-
-        path.write_text(pyyaml.safe_dump(data, sort_keys=False), encoding="utf-8")
-
     path.parent.mkdir(parents=True, exist_ok=True)
     if yaml is not None:
         with path.open("w", encoding="utf-8") as fh:

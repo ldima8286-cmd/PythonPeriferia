@@ -553,3 +553,25 @@ class TestStatusAgainstRealStateConstants:
 
         assert model.MicStatus(state=state.LATCHED).latched
         assert not model.MicStatus(state=state.CLOSED).latched
+
+
+class TestRawRoundTrip:
+    """A section edit must not cost the comments in the rest of the file."""
+
+    @pytest.mark.skipif(not model.HAVE_ROUND_TRIP, reason="needs ruamel")
+    def test_save_raw_keeps_comments_and_the_other_sections(self, tmp_path):
+        path = tmp_path / "config.yaml"
+        path.write_text(
+            "# header\nptt:\n  ptt_key: KEY_F10  # the key\n", encoding="utf-8"
+        )
+        data = model.load_roundtrip(path)
+        assert data["ptt"]["ptt_key"] == "KEY_F10"
+        data["profiles"] = [{"name": "x"}]
+        model.save_raw(path, data)
+        text = path.read_text(encoding="utf-8")
+        assert "# header" in text
+        assert "# the key" in text
+        assert "profiles:" in text
+
+    def test_load_roundtrip_of_a_missing_file_is_empty(self, tmp_path):
+        assert model.load_roundtrip(tmp_path / "nope.yaml") == {}
